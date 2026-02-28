@@ -1,0 +1,14 @@
+.git
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+.env
+alembic/versions/__pycache__/

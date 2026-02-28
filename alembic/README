@@ -1,0 +1,12 @@
+# Alembic directory placeholder.
+#
+# Responsibility:
+# - Host migration scripts under versions/ and template files.
+#
+# Planned structure:
+# - env.py (context)
+# - script.py.mako (template)
+# - versions/ (individual migration files)
+#
+# Limitations (skeleton phase):
+# - No migration scripts present.
