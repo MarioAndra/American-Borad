@@ -25,7 +25,6 @@ htmlcov/
 *.log
 *.tmp
 .env
-.env.*
 .python-version
 *.sqlite3
 alembic/versions/__pycache__/
