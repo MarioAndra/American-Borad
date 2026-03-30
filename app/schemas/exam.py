@@ -59,3 +59,5 @@ class ExamResult(BaseModel):
     score_percent: float
     correct_count: int
     total_questions: int
+    message: str
+    notes: list[str] | None

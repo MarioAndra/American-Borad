@@ -108,6 +108,17 @@ def submit_exam(db: Session, exam_id: int, answers: Sequence[tuple[int, int]]) -
     from app.models import StudentAnswer
     inserted = 0
     correct = 0
+    wrong_qids: set[int] = set()
+    q_to_subtopic: dict[int, str] = {}
+    if allowed:
+        rows = (
+            db.query(Question.id, SubTopic.name)
+            .join(SubTopic, Question.subtopic_id == SubTopic.id)
+            .filter(Question.id.in_(list(allowed)))
+            .all()
+        )
+        for qid, st_name in rows:
+            q_to_subtopic[qid] = st_name
     for qid, cid in amap.items():
         is_ok = correct_map.get(qid) == cid
         sa = StudentAnswer(exam_id=exam.id, question_id=qid, choice_id=cid, is_correct=is_ok)
@@ -115,9 +126,56 @@ def submit_exam(db: Session, exam_id: int, answers: Sequence[tuple[int, int]]) -
         inserted += 1
         if is_ok:
             correct += 1
+        else:
+            wrong_qids.add(qid)
+    answered_qids = set(amap.keys())
+    unanswered_qids = allowed - answered_qids
+    wrong_qids.update(unanswered_qids)
     exam.score = round((correct / max(exam.total_questions, 1)) * 100, 2)
     exam.status = ExamStatus.Completed
     exam.submitted_at = datetime.now(timezone.utc)
     db.add(exam)
     db.commit()
-    return {"score_percent": float(exam.score or 0), "correct_count": correct, "total_questions": exam.total_questions}
+    score_percent = float(exam.score or 0)
+    if score_percent >= 90:
+        message = "Exam passed successfully"
+        notes_list: list[str] | None = None
+    elif score_percent >= 80:
+        message = "Exam passed"
+        if Phase.id == exam.phase_id:
+            subtopics = (
+                db.query(SubTopic.name)
+                .join(Question, Question.subtopic_id == SubTopic.id)
+                .join(Topic, SubTopic.topic_id == Topic.id)
+                .join(Phase, Topic.phase_id == Phase.id)
+                .filter(Question.id.in_(list(wrong_qids)), Phase.id == 1)
+                .distinct()
+                .all()
+            )
+            notes_list = [s[0] for s in subtopics]
+        else:
+            subtopics = {q_to_subtopic.get(qid) for qid in wrong_qids if q_to_subtopic.get(qid)}
+            notes_list = sorted(subtopics) if subtopics else []
+    else:
+        message = "Unfortunately, you did not pass the exam"
+        if exam.phase_id == 1:
+            subtopics = (
+                db.query(SubTopic.name)
+                .join(Question, Question.subtopic_id == SubTopic.id)
+                .join(Topic, SubTopic.topic_id == Topic.id)
+                .join(Phase, Topic.phase_id == Phase.id)
+                .filter(Question.id.in_(list(wrong_qids)), Phase.id == 1)
+                .distinct()
+                .all()
+            )
+            notes_list = [s[0] for s in subtopics]
+        else:
+            subtopics = {q_to_subtopic.get(qid) for qid in wrong_qids if q_to_subtopic.get(qid)}
+            notes_list = sorted(subtopics) if subtopics else []
+    return {
+        "score_percent": score_percent,
+        "correct_count": correct,
+        "total_questions": exam.total_questions,
+        "message": message,
+        "notes": notes_list,
+    }

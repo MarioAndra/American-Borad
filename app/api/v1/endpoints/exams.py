@@ -70,7 +70,7 @@ def get_exam_detail(exam_id: int, user: User = Depends(get_current_user), db: Se
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
-@router.post("/exams/{exam_id}/submit", response_model=ExamResult, dependencies=[Depends(require_roles("Student"))])
+@router.post("/exams/{exam_id}/submit", response_model=ExamResult, response_model_exclude_none=True, dependencies=[Depends(require_roles("Student"))])
 def submit_exam_answers(exam_id: int, payload: ExamSubmission, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ExamResult:
     exam = db.query(Exam).filter(Exam.id == exam_id).first()
     if not exam or exam.student_id != user.id:
