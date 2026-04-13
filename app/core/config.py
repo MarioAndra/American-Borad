@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # App URLs
     BASE_URL: str = "http://localhost:8000"
 
+    # Phase II Adaptive Exam
+    PHASE2_ENABLED: bool = True
+    PHASE2_PHASE_ID: int = 2
+    PHASE2_MAX_QUESTIONS: int = 20
+    PHASE2_PASSING_SCORE: float = 75.0
+    PHASE2_INITIAL_THETA: float = 0.0
+
     # Mail
     MAIL_HOST: str = "smtp.gmail.com"
     MAIL_PORT: int = 587

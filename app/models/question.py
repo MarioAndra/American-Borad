@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text, func, text as sa_text
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Float, ForeignKey, Integer, String, Text, func, text as sa_text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -23,6 +23,9 @@ class Question(Base):
         index=True,
     )
     question_type: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    irt_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    irt_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    irt_c: Mapped[float | None] = mapped_column(Float, nullable=True)
     subtopic_id: Mapped[int] = mapped_column(
         ForeignKey("subtopics.id", ondelete="RESTRICT"),
         nullable=False,

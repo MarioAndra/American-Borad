@@ -12,6 +12,8 @@ from .exam_question import ExamQuestion
 from .student_answer import StudentAnswer
 from .token_blacklist import TokenBlacklist
 from .refresh_token import RefreshToken
+from .adaptive_exam import AdaptiveExam
+from .adaptive_exam_response import AdaptiveExamResponse
 
 __all__ = [
     "Base",
@@ -32,4 +34,6 @@ __all__ = [
     "StudentAnswer",
     "TokenBlacklist",
     "RefreshToken",
+    "AdaptiveExam",
+    "AdaptiveExamResponse",
 ]

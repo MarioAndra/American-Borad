@@ -28,3 +28,6 @@ htmlcov/
 .python-version
 *.sqlite3
 alembic/versions/__pycache__/
+
+American.postman_collection.json
+Prof Proposal.md
