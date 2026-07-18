@@ -1,4 +1,4 @@
-from .enums import DifficultyLevel, ExamStatus, UserRole, CognitiveLevel, QuestionType
+from .enums import DifficultyLevel, ExamStatus, UserRole, CognitiveLevel, QuestionType, GeneratedQuestionStatus
 from .user import User
 from app.db.base import Base
 from .abet_criteria import ABETCriterion
@@ -14,6 +14,7 @@ from .token_blacklist import TokenBlacklist
 from .refresh_token import RefreshToken
 from .adaptive_exam import AdaptiveExam
 from .adaptive_exam_response import AdaptiveExamResponse
+from .rag import KnowledgeDocument, KnowledgeChunk, GeneratedQuestion, GeneratedQuestionEvidence, GeneratedQuestionReview, StudentTopicProgress
 
 __all__ = [
     "Base",
@@ -22,6 +23,7 @@ __all__ = [
     "UserRole",
     "CognitiveLevel",
     "QuestionType",
+    "GeneratedQuestionStatus",
     "User",
     "ABETCriterion",
     "Phase",
@@ -36,4 +38,10 @@ __all__ = [
     "RefreshToken",
     "AdaptiveExam",
     "AdaptiveExamResponse",
+    "KnowledgeDocument",
+    "KnowledgeChunk",
+    "GeneratedQuestion",
+    "GeneratedQuestionEvidence",
+    "GeneratedQuestionReview",
+    "StudentTopicProgress",
 ]

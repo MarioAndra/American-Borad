@@ -7,7 +7,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import AdaptiveExam, AdaptiveExamResponse, Choice, ExamStatus, Phase, Question, SubTopic, Topic
+from app.core.logging import get_logger
+from app.models import AdaptiveExam, AdaptiveExamResponse, Choice, ExamStatus, GeneratedQuestion, Phase, Question, StudentTopicProgress, SubTopic, Topic
+from app.models.enums import CognitiveLevel, DifficultyLevel, GeneratedQuestionStatus
+from app.services.generated_question_service import GeneratedQuestionService, GenerationInput
+from app.services.generated_question_validation_service import GeneratedQuestionValidationService
+from app.services.rag_retrieval_service import RAGRetrievalService
+from app.services.topic_streak_service import TopicStreakService
+
+log = get_logger(__name__)
 
 try:
     from catsim.selection import MaxInfoSelector  # type: ignore
@@ -113,13 +121,45 @@ def _next_theta(theta_before: float, is_correct: bool) -> float:
 
 def _question_payload(db: Session, q: Question) -> dict:
     choices = db.query(Choice).filter(Choice.question_id == q.id).order_by(Choice.id.asc()).all()
+    topic = db.query(Topic).filter(Topic.id == q.subtopic.topic_id).first()
     return {
         "id": q.id,
         "text": q.text,
         "difficulty": q.difficulty,
         "cognitive_level": q.cognitive_level,
         "question_type": q.question_type,
+        "is_generated": False,
+        "topic_id": topic.id if topic else 0,
+        "topic_name": topic.name if topic else "Unknown",
         "choices": [{"id": c.id, "text": c.text} for c in choices],
+    }
+
+
+def _map_difficulty_estimate(estimate: float | None) -> DifficultyLevel:
+    if estimate is None:
+        return DifficultyLevel.Medium
+    if estimate < 0.33:
+        return DifficultyLevel.Easy
+    if estimate < 0.66:
+        return DifficultyLevel.Medium
+    return DifficultyLevel.Hard
+
+
+def _generated_question_payload(db: Session, gq: GeneratedQuestion) -> dict:
+    topic = db.query(Topic).filter(Topic.id == gq.topic_id).first()
+    return {
+        "id": gq.id,
+        "text": gq.text,
+        "difficulty": _map_difficulty_estimate(gq.difficulty_estimate),
+        "cognitive_level": CognitiveLevel.Application,
+        "question_type": "SingleChoice",
+        "is_generated": True,
+        "topic_id": topic.id if topic else 0,
+        "topic_name": topic.name if topic else "Unknown",
+        "choices": [
+            {"id": i, "text": opt["text"]}
+            for i, opt in enumerate(gq.choices, start=1)
+        ],
     }
 
 
@@ -142,7 +182,19 @@ def _build_result(exam: AdaptiveExam, answered: list[AdaptiveExamResponse]) -> d
     }
 
 
-def _progress_payload(db: Session, exam: AdaptiveExam, next_question: Question | None, result: dict | None = None) -> dict:
+def _progress_payload(
+    db: Session,
+    exam: AdaptiveExam,
+    next_question: Question | None = None,
+    result: dict | None = None,
+    next_generated: GeneratedQuestion | None = None,
+) -> dict:
+    if next_generated:
+        question_payload = _generated_question_payload(db, next_generated)
+    elif next_question:
+        question_payload = _question_payload(db, next_question)
+    else:
+        question_payload = None
     return {
         "exam_id": exam.id,
         "status": exam.status,
@@ -151,7 +203,7 @@ def _progress_payload(db: Session, exam: AdaptiveExam, next_question: Question |
         "max_questions": exam.max_questions,
         "remaining_questions": max(exam.max_questions - exam.answered_count, 0),
         "current_theta": float(exam.current_theta),
-        "current_question": _question_payload(db, next_question) if next_question else None,
+        "current_question": question_payload,
         "result": result,
         "started_at": exam.started_at,
         "submitted_at": exam.submitted_at,
@@ -208,6 +260,88 @@ def start_adaptive_exam(db: Session, student_id: int, phase_id: int | None) -> d
     return _progress_payload(db, exam, first_question, result=None)
 
 
+def _is_generated_question(db: Session, question_id: int, exam_id: int) -> GeneratedQuestion | None:
+    return (
+        db.query(GeneratedQuestion)
+        .filter(GeneratedQuestion.id == question_id, GeneratedQuestion.source_exam_id == exam_id)
+        .first()
+    )
+
+
+def _try_generate_next(db: Session, exam_id: int, topic_id: int, theta: float, student_id: int) -> GeneratedQuestion | None:
+    settings = get_settings()
+    if not settings.RAG_ENABLED:
+        return None
+
+    streak_service = TopicStreakService(db, student_id)
+    streak_info = streak_service.get_streak(exam_id, topic_id)
+    if not streak_info.can_generate:
+        return None
+
+    retrieval = RAGRetrievalService(db)
+    chunks = retrieval.retrieve(topic_id, query=streak_info.topic_name, top_k=5)
+    retrieval.close()
+    if not chunks:
+        log.info("No retrieval chunks for topic %d, skipping generation", topic_id)
+        return None
+
+    gen_service = GeneratedQuestionService(db)
+    gen_input = GenerationInput(
+        topic_id=topic_id,
+        topic_name=streak_info.topic_name,
+        theta=theta,
+        recent_streak=streak_info.current_streak,
+        avg_theta=streak_info.avg_theta,
+        retrieved_chunks=chunks,
+    )
+    gen_output = gen_service.generate(gen_input)
+    if not gen_output:
+        log.info("Generation produced no output for topic %d", topic_id)
+        return None
+
+    validation = GeneratedQuestionValidationService(db)
+    v_report = validation.validate(gen_output.question_text, gen_output.options, gen_output.explanation)
+    if not v_report.valid:
+        log.warning("Generated question failed validation: %s", v_report.issues)
+        return None
+
+    gq = GeneratedQuestion(
+        topic_id=topic_id,
+        source_exam_id=exam_id,
+        text=gen_output.question_text,
+        choices=gen_output.options,
+        explanation=gen_output.explanation,
+        difficulty_estimate=gen_output.difficulty_estimate,
+        status=GeneratedQuestionStatus.auto_approved if not settings.RAG_REVIEW_REQUIRED else GeneratedQuestionStatus.draft,
+        review_required=bool(settings.RAG_REVIEW_REQUIRED),
+        validation_report={
+            "schema_ok": v_report.schema_ok,
+            "single_correct": v_report.single_correct,
+            "non_duplicate": v_report.non_duplicate,
+            "max_similarity": v_report.max_similarity,
+            "issues": v_report.issues,
+        },
+    )
+    db.add(gq)
+    db.flush()
+
+    # Persist source evidence for every retrieved chunk used in generation
+    from app.models.rag import GeneratedQuestionEvidence
+    for rc in chunks:
+        evidence = GeneratedQuestionEvidence(
+            generated_question_id=gq.id,
+            chunk_id=rc.chunk_id,
+            relevance_score=rc.similarity,
+        )
+        db.add(evidence)
+    db.flush()
+    log.info("Persisted %d evidence rows for question %d", len(chunks), gq.id)
+
+    streak_service.increment_generated(exam_id, topic_id)
+    log.info("Generated question %d for exam %d topic %d", gq.id, exam_id, topic_id)
+    return gq
+
+
 def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_id: int, choice_id: int) -> dict:
     exam = db.query(AdaptiveExam).filter(AdaptiveExam.id == exam_id, AdaptiveExam.student_id == student_id).first()
     if not exam:
@@ -218,31 +352,58 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     pool = _get_phase_question_pool(db, exam.phase_id, seed_missing_irt=False)
     by_id = {q.id: q for q in pool}
     q = by_id.get(question_id)
+    generated_q = None
+
     if not q:
-        raise ValueError("Question does not belong to this adaptive exam phase")
+        generated_q = _is_generated_question(db, question_id, exam_id)
+        if not generated_q:
+            raise ValueError("Question does not belong to this adaptive exam phase")
 
-    exists = (
-        db.query(AdaptiveExamResponse)
-        .filter(AdaptiveExamResponse.adaptive_exam_id == exam.id, AdaptiveExamResponse.question_id == question_id)
-        .first()
-    )
-    if exists:
-        raise ValueError("Question already answered")
+    if q:
+        exists = (
+            db.query(AdaptiveExamResponse)
+            .filter(AdaptiveExamResponse.adaptive_exam_id == exam.id, AdaptiveExamResponse.question_id == question_id)
+            .first()
+        )
+        if exists:
+            raise ValueError("Question already answered")
 
-    choice = db.query(Choice).filter(Choice.id == choice_id, Choice.question_id == question_id).first()
-    if not choice:
-        raise ValueError("Invalid choice for this question")
+        choice = db.query(Choice).filter(Choice.id == choice_id, Choice.question_id == question_id).first()
+        if not choice:
+            raise ValueError("Invalid choice for this question")
 
-    correct_choice = db.query(Choice.id).filter(Choice.question_id == question_id, Choice.is_correct == True).first()  # noqa: E712
-    is_correct = bool(correct_choice and int(correct_choice[0]) == choice_id)
+        correct_choice = db.query(Choice.id).filter(Choice.question_id == question_id, Choice.is_correct == True).first()  # noqa: E712
+        is_correct = bool(correct_choice and int(correct_choice[0]) == choice_id)
+        topic_id = q.subtopic.topic_id
+    else:
+        exists = (
+            db.query(AdaptiveExamResponse)
+            .filter(
+                AdaptiveExamResponse.adaptive_exam_id == exam.id,
+                AdaptiveExamResponse.generated_question_id == question_id,
+            )
+            .first()
+        )
+        if exists:
+            raise ValueError("Question already answered")
+
+        selected_idx = choice_id - 1
+        options = generated_q.choices
+        if selected_idx < 0 or selected_idx >= len(options):
+            raise ValueError("Invalid choice for this question")
+
+        is_correct = bool(options[selected_idx].get("is_correct"))
+        topic_id = generated_q.topic_id
 
     theta_before = float(exam.current_theta)
     theta_after = _next_theta(theta_before, is_correct)
 
     ans = AdaptiveExamResponse(
         adaptive_exam_id=exam.id,
-        question_id=question_id,
-        choice_id=choice_id,
+        question_id=question_id if q else None,
+        generated_question_id=generated_q.id if generated_q else None,
+        choice_id=choice_id if q else None,
+        selected_option_index=None if q else choice_id,
         order_index=exam.answered_count + 1,
         is_correct=is_correct,
         theta_before=theta_before,
@@ -255,32 +416,63 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     db.add(exam)
     db.flush()
 
+    # Per-topic theta tracking for all answers
+    ts_service = TopicStreakService(db, student_id)
+    ts_service.update_topic_theta(exam_id, topic_id, theta_after)
+
+    # Track topic streak for regular questions
+    if not generated_q:
+        ts_service.record_answer(exam_id, topic_id, theta_after)
+
+    # Mark topic consumed after answering a generated question
+    if generated_q:
+        ts_service.mark_topic_consumed(exam_id, topic_id)
+
     answered = (
         db.query(AdaptiveExamResponse)
         .filter(AdaptiveExamResponse.adaptive_exam_id == exam.id)
         .order_by(AdaptiveExamResponse.order_index.asc())
         .all()
     )
-    asked_ids = {r.question_id for r in answered}
+    asked_ids = {r.question_id for r in answered if r.question_id is not None}
 
     if exam.answered_count >= exam.max_questions:
         result = _build_result(exam, answered)
         db.add(exam)
         db.commit()
         db.refresh(exam)
-        return _progress_payload(db, exam, None, result=result)
+        return _progress_payload(db, exam, result=result)
 
-    next_question = _select_next_question(pool, asked_ids, exam.current_theta)
+    # Try topic-aware generation if enabled
+    next_generated = _try_generate_next(db, exam_id, topic_id, theta_after, student_id) if not generated_q else None
+    if next_generated:
+        db.commit()
+        db.refresh(exam)
+        return _progress_payload(db, exam, next_generated=next_generated)
+
+    # Filter out consumed topics from the pool
+    consumed_topic_ids = ts_service.get_consumed_topic_ids(exam_id)
+    available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
+    selection_theta = 0.0 if consumed_topic_ids else exam.current_theta
+
+    if not available_pool:
+        result = _build_result(exam, answered)
+        db.add(exam)
+        db.commit()
+        db.refresh(exam)
+        return _progress_payload(db, exam, result=result)
+
+    next_question = _select_next_question(available_pool, asked_ids, selection_theta)
     if not next_question:
         result = _build_result(exam, answered)
         db.add(exam)
         db.commit()
         db.refresh(exam)
-        return _progress_payload(db, exam, None, result=result)
+        return _progress_payload(db, exam, result=result)
 
     db.commit()
     db.refresh(exam)
-    return _progress_payload(db, exam, next_question, result=None)
+    return _progress_payload(db, exam, next_question=next_question)
 
 
 def get_adaptive_exam(db: Session, student_id: int, exam_id: int) -> dict:
@@ -307,6 +499,9 @@ def get_adaptive_exam(db: Session, student_id: int, exam_id: int) -> dict:
         return _progress_payload(db, exam, None, result=result)
 
     pool = _get_phase_question_pool(db, exam.phase_id, seed_missing_irt=False)
+    ts_service = TopicStreakService(db, student_id)
+    consumed_topic_ids = ts_service.get_consumed_topic_ids(exam_id)
+    available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
     asked_ids = {r.question_id for r in answered}
-    next_question = _select_next_question(pool, asked_ids, exam.current_theta)
+    next_question = _select_next_question(available_pool, asked_ids, exam.current_theta)
     return _progress_payload(db, exam, next_question, result=None)

@@ -1,14 +1,15 @@
-# Common utility placeholders.
-#
-# Responsibility:
-# - Host small, reusable helper functions that do not belong to a specific
-#   domain service (e.g., slugify, safe int parsing, timestamp helpers).
-#
-# Planned contents:
-# - to_snake_case(name): string normalization.
-# - utcnow(): returns timezone-aware UTC datetime.
-# - shuffle_list(items): wrapper around random shuffling with seed support.
-#
-# Limitations (skeleton phase):
-# - No actual implementations provided.
+from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def slugify(text: str, max_len: int = 120) -> str:
+    s = text.lower().strip()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[-\s]+", "-", s)
+    return s[:max_len].rstrip("-")

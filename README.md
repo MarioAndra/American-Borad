@@ -177,3 +177,21 @@ WHERE t.phase_id = 2
 
 ## Using Uvicorn (FastAPI/Starlette)
  ``uvicorn app.main:app --reload``
+
+1. Wipe the DB volume (this destroys the data, not the image):
+docker compose down -v
+2. Restart everything (migrations auto-run on first start):
+docker compose up -d
+3. Import Phase I Excel (inside the running container):
+docker compose exec app python -m app.scripts.import_questions_from_excel --dir "/app/data"
+4. Re-ingest courses for RAG via the API:
+# Seed an admin first
+docker compose exec app python -m app.scripts.seed_admin --email admin@example.com --password admin123
+
+
+
+
+# Create an admin user
+python -m app.scripts.seed_admin --email admin@example.com --password admin123
+# Full name override
+python -m app.scripts.seed_admin --email admin@example.com --password admin123 --name "Super Admin"

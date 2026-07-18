@@ -21,6 +21,9 @@ class AdaptiveQuestionRead(BaseModel):
     difficulty: DifficultyLevel
     cognitive_level: CognitiveLevel
     question_type: str
+    is_generated: bool
+    topic_id: int
+    topic_name: str
     choices: list[AdaptiveChoiceRead]
 
 

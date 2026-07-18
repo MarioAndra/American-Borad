@@ -1,20 +1,60 @@
-# Custom exception types and FastAPI exception handlers.
-#
-# Responsibility:
-# - Define domain-specific exceptions (e.g., Unauthorized, Forbidden,
-#   NotFound, ValidationError) used by services and routers.
-# - Register global exception handlers mapping to appropriate HTTP responses.
-# - Provide standard error response structure for consistency.
-#
-# Planned contents:
-# - Exception classes and a function to register handlers with FastAPI app.
-# - Mapping service-layer errors to HTTPException responses.
-# - Optional Sentry/observability integration hooks.
-#
-# Limitations (skeleton phase):
-# - No code; only descriptive placeholders.
-#
-# Notes for future implementation:
-# - Ensure no sensitive details leak in error messages.
-# - Use logging with contextual metadata for incident analysis.
+from __future__ import annotations
 
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
+
+
+class AppException(Exception):
+    status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR
+    detail: str = "Internal server error"
+
+    def __init__(self, detail: str | None = None) -> None:
+        if detail:
+            self.detail = detail
+
+
+class NotFoundException(AppException):
+    status_code = status.HTTP_404_NOT_FOUND
+    detail = "Resource not found"
+
+
+class ValidationException(AppException):
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    detail = "Validation failed"
+
+
+class ConflictException(AppException):
+    status_code = status.HTTP_409_CONFLICT
+    detail = "Resource already exists"
+
+
+class UnauthorizedException(AppException):
+    status_code = status.HTTP_401_UNAUTHORIZED
+    detail = "Not authenticated"
+
+
+class ForbiddenException(AppException):
+    status_code = status.HTTP_403_FORBIDDEN
+    detail = "Insufficient permissions"
+
+
+_EXCEPTION_HANDLERS: dict[type[AppException], int] = {
+    NotFoundException: status.HTTP_404_NOT_FOUND,
+    ValidationException: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    ConflictException: status.HTTP_409_CONFLICT,
+    UnauthorizedException: status.HTTP_401_UNAUTHORIZED,
+    ForbiddenException: status.HTTP_403_FORBIDDEN,
+}
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    for exc_cls, http_code in _EXCEPTION_HANDLERS.items():
+
+        def _handler(request, exc: AppException, code: int = http_code) -> JSONResponse:
+            return JSONResponse(status_code=code, content={"detail": exc.detail or exc_cls.detail})
+
+        app.add_exception_handler(exc_cls, _handler)
+
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request, exc: AppException) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})

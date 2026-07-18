@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: american_board
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  weaviate:
+    image: semitechnologies/weaviate:latest
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      CLUSTER_HOSTNAME: "node1"
+      GRPC_PORT: "8081"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./courses:/app/courses
+      - ./.env:/app/.env
+      - ./app/data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+      weaviate:
+        condition: service_started
+
+volumes:
+  pgdata:
+  weaviate_data:

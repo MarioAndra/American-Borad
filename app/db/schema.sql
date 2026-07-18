@@ -10,6 +10,7 @@
 # - user_role: 'Student', 'Admin'
 # - cognitive_level: 'Knowledge', 'Application', 'Analysis'
 # - question_type: 'SingleChoice', 'MultipleSelect'
+# - generated_question_status: 'draft', 'approved', 'rejected', 'auto_approved'
 #
 # TAXONOMY TABLES:
 # TABLE: phases
@@ -120,6 +121,71 @@
 # - expires_at TIMESTAMPTZ NOT NULL
 # - created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 # INDEXES: ON user_id, expires_at
+#
+# RAG TABLES (Phase II Topic-Aware):
+# EXTENSION: vector (pgvector)
+#
+# TABLE: knowledge_documents
+# - id PK
+# - course_name TEXT NOT NULL
+# - title TEXT NOT NULL
+# - topic_id FK -> topics(id) ON DELETE SET NULL
+# - source_path TEXT NOT NULL
+# - resource_type TEXT NOT NULL (page/pdf/transcript)
+# - created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+# INDEXES: ON topic_id
+#
+# TABLE: knowledge_chunks
+# - id PK
+# - document_id FK -> knowledge_documents(id) ON DELETE CASCADE
+# - chunk_index INT NOT NULL
+# - text TEXT NOT NULL
+# - embedding vector(1536) NULL
+# - topic_id FK -> topics(id) ON DELETE SET NULL
+# - created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+# INDEXES: ON document_id, topic_id
+#
+# TABLE: generated_questions
+# - id PK
+# - topic_id FK -> topics(id) ON DELETE RESTRICT
+# - source_exam_id FK -> adaptive_exams(id) ON DELETE SET NULL
+# - text TEXT NOT NULL
+# - choices JSON NOT NULL (array of {text, is_correct})
+# - explanation TEXT NOT NULL
+# - difficulty_estimate FLOAT NULL
+# - status generated_question_status NOT NULL
+# - review_required BOOL NOT NULL DEFAULT TRUE
+# - validation_report JSON NULL
+# - created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+# INDEXES: ON topic_id, status
+#
+# TABLE: generated_question_evidence
+# - id PK
+# - generated_question_id FK -> generated_questions(id) ON DELETE CASCADE
+# - chunk_id FK -> knowledge_chunks(id) ON DELETE RESTRICT
+# - relevance_score FLOAT NULL
+# INDEXES: ON generated_question_id, chunk_id
+#
+# TABLE: generated_question_reviews
+# - id PK
+# - generated_question_id FK -> generated_questions(id) ON DELETE CASCADE
+# - reviewer_id FK -> users(id) ON DELETE SET NULL
+# - decision TEXT NOT NULL
+# - comments TEXT NULL
+# - reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+# INDEXES: ON generated_question_id
+#
+# TABLE: student_topic_progress
+# - id PK
+# - student_id FK -> users(id) ON DELETE CASCADE
+# - exam_id FK -> adaptive_exams(id) ON DELETE CASCADE
+# - topic_id FK -> topics(id) ON DELETE RESTRICT
+# - current_streak INT NOT NULL DEFAULT 0
+# - questions_asked INT NOT NULL DEFAULT 0
+# - generated_count INT NOT NULL DEFAULT 0
+# - avg_theta FLOAT NULL
+# - created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+# INDEXES: ON student_id, exam_id, topic_id
 #
 # NOTES:
 # - All timestamps use timezone-aware TIMESTAMPTZ.

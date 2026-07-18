@@ -14,8 +14,10 @@ class AdaptiveExamResponse(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     adaptive_exam_id: Mapped[int] = mapped_column(ForeignKey("adaptive_exams.id", ondelete="CASCADE"), nullable=False, index=True)
-    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="RESTRICT"), nullable=False, index=True)
-    choice_id: Mapped[int] = mapped_column(ForeignKey("choices.id", ondelete="RESTRICT"), nullable=False, index=True)
+    question_id: Mapped[int | None] = mapped_column(ForeignKey("questions.id", ondelete="RESTRICT"), nullable=True, index=True)
+    generated_question_id: Mapped[int | None] = mapped_column(ForeignKey("generated_questions.id", ondelete="SET NULL"), nullable=True, index=True)
+    choice_id: Mapped[int | None] = mapped_column(ForeignKey("choices.id", ondelete="RESTRICT"), nullable=True, index=True)
+    selected_option_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
     is_correct: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_text("false"))
     theta_before: Mapped[float] = mapped_column(Float, nullable=False)
@@ -25,3 +27,4 @@ class AdaptiveExamResponse(Base):
     exam: Mapped["AdaptiveExam"] = relationship(back_populates="responses")
     question: Mapped["Question"] = relationship()
     choice: Mapped["Choice"] = relationship()
+    generated_question: Mapped["GeneratedQuestion | None"] = relationship()

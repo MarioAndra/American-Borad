@@ -12,3 +12,10 @@ openpyxl>=3.1,<4.0
 python-multipart>=0.0.7,<0.1
 email-validator>=2.0.0
 catsim>=0.17,<1.0
+
+# RAG / AI
+openai>=1.55,<2.0
+google-genai>=1.0,<2.0
+tiktoken>=0.7,<1.0
+pypdf>=4.2,<5.0
+weaviate-client

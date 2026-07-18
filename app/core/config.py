@@ -49,6 +49,53 @@ class Settings(BaseSettings):
     MAIL_USE_TLS: bool = Field(default=True, env=["MAIL_USE_TLS", "MAIL_TLS"])
     MAIL_ENCRYPTION: Optional[str] = None
 
+    # RAG — Ingestion & Retrieval
+    RAG_ENABLED: bool = True
+    RAG_SOURCE_ROOT: str = "./courses"
+    RAG_EMBEDDING_PROVIDER: str = "openai"
+    RAG_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    RAG_GENERATION_PROVIDER: str = "openai"
+    RAG_GENERATION_MODEL: str = "gpt-4o-mini"
+    RAG_CHUNK_SIZE: int = 1200
+    RAG_CHUNK_OVERLAP: int = 180
+    RAG_RETRIEVAL_TOP_K: int = 8
+    RAG_MIN_SIMILARITY: float = 0.2
+    RAG_ALLOWED_SOURCE_TYPES: str = "page,resource,pdf,transcript"
+
+    # Phase II — Topic/SubTopic Adaptive Controls
+    PHASE2_SUBTOPIC_BASE_QUESTION_COUNT: int = 4
+    PHASE2_SUBTOPIC_GENERATED_QUESTION_COUNT: int = 1
+    PHASE2_RESET_THETA_PER_TOPIC: bool = True
+    PHASE2_GENERATED_THETA_STEP_FACTOR: float = 0.5
+
+    # Generated MCQ Constraints
+    GENERATED_MCQ_OPTION_COUNT: int = 4
+    GENERATED_MCQ_REQUIRE_CITATIONS: bool = True
+    GENERATED_MCQ_REQUIRE_DISTRACTOR_RATIONALE: bool = True
+    RAG_REVIEW_REQUIRED: bool = False
+    RAG_ALLOW_VECTOR_FALLBACK: bool = False
+    RAG_OCR_ENABLED: bool = False
+
+    # External API keys
+    OPENAI_API_KEY: Optional[str] = None
+
+    # Weaviate vector store
+    WEAVIATE_URL: str = "http://localhost:8080"
+
+    # Gemini (alternative provider for RAG)
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_EMBEDDING_MODEL: str = "text-embedding-002"
+    GEMINI_GENERATION_MODEL: str = "gemini-2.5-flash"
+
+    # Groq (OpenAI-compatible provider for RAG)
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_EMBEDDING_MODEL: str = "mxbai-embed-large"
+    GROQ_GENERATION_MODEL: str = "llama-3.3-70b-versatile"
+
+    # Logging
+    LOG_LEVEL: str = "INFO"
+
 
 _settings: Settings | None = None
 

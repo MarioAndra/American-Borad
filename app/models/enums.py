@@ -27,3 +27,10 @@ class CognitiveLevel(str, enum.Enum):
 class QuestionType(str, enum.Enum):
     SingleChoice = "SingleChoice"
     MultipleSelect = "MultipleSelect"
+
+
+class GeneratedQuestionStatus(str, enum.Enum):
+    draft = "draft"
+    approved = "approved"
+    rejected = "rejected"
+    auto_approved = "auto_approved"
