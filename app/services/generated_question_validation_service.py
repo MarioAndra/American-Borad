@@ -22,8 +22,11 @@ class ValidationReport:
     issues: list[str] = field(default_factory=list)
     schema_ok: bool = False
     single_correct: bool = False
-    non_duplicate: bool = False
+    non_duplicate: bool = True
     judge_feedback: str | None = None
+    judge_ok: bool | None = None
+    judge_ambiguity: bool | None = None
+    judge_factual_error: bool | None = None
     max_similarity: float = 0.0
 
 
@@ -43,12 +46,16 @@ class GeneratedQuestionValidationService:
 
         self._check_schema(question_text, options, explanation, report)
         self._check_single_correct(options, report)
-        self._check_duplicate(question_text, report)
 
         if self.settings.RAG_REVIEW_REQUIRED or self.settings.RAG_ENABLED:
             self._llm_judge(question_text, options, explanation, report)
 
-        report.valid = all([report.schema_ok, report.single_correct, report.non_duplicate])
+        report.valid = all([
+            report.schema_ok,
+            report.single_correct,
+            report.non_duplicate,
+            report.judge_ok is not False,
+        ])
         return report
 
     def _check_schema(self, question_text: str, options: list[dict], explanation: str, report: ValidationReport) -> None:
@@ -78,40 +85,11 @@ class GeneratedQuestionValidationService:
             report.issues.append(f"Expected exactly 1 correct option, found {correct_count}")
             report.single_correct = False
 
-    def _check_duplicate(self, question_text: str, report: ValidationReport) -> None:
-        existing = self.db.query(Question.text).all()
-        if not existing:
-            report.non_duplicate = True
-            report.max_similarity = 0.0
-            return
-
-        tokens_new = set(_ENC.encode(question_text))
-        if not tokens_new:
-            report.non_duplicate = True
-            report.max_similarity = 0.0
-            return
-
-        best = 0.0
-        for (existing_text,) in existing:
-            tokens_existing = set(_ENC.encode(existing_text))
-            if not tokens_existing:
-                continue
-            overlap = len(tokens_new & tokens_existing)
-            union = len(tokens_new | tokens_existing)
-            sim = overlap / union if union > 0 else 0.0
-            if sim > best:
-                best = sim
-
-        report.max_similarity = round(best, 4)
-        if best > 0.85:
-            report.issues.append(f"Too similar to existing question (Jaccard={best:.2f})")
-            report.non_duplicate = False
-        else:
-            report.non_duplicate = True
-
     def _llm_judge(self, question_text: str, options: list[dict], explanation: str, report: ValidationReport) -> None:
         if not self._llm.is_available:
             report.judge_feedback = "LLM judge skipped: no API key"
+            report.judge_ok = False
+            report.issues.append("LLM judge unavailable: no API key configured")
             return
 
         correct_text = next((o["text"] for o in options if o.get("is_correct")), "")
@@ -143,8 +121,13 @@ class GeneratedQuestionValidationService:
             if content:
                 parsed = json.loads(content)
                 report.judge_feedback = parsed.get("feedback", "")
+                report.judge_ok = parsed.get("valid", True)
+                report.judge_ambiguity = parsed.get("ambiguity_found", False)
+                report.judge_factual_error = parsed.get("factual_error", False)
                 if not parsed.get("valid", True) or parsed.get("ambiguity_found") or parsed.get("factual_error"):
                     report.issues.append(f"LLM judge: {parsed.get('feedback', 'quality issue detected')}")
         except Exception as exc:
             log.warning("LLM judge call failed: %s", exc)
             report.judge_feedback = f"Judge call failed: {exc}"
+            report.judge_ok = False
+            report.issues.append(f"LLM judge call failed: {exc}")

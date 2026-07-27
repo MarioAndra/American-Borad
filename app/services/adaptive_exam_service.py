@@ -12,6 +12,7 @@ from app.models import AdaptiveExam, AdaptiveExamResponse, Choice, ExamStatus, G
 from app.models.enums import CognitiveLevel, DifficultyLevel, GeneratedQuestionStatus
 from app.services.generated_question_service import GeneratedQuestionService, GenerationInput
 from app.services.generated_question_validation_service import GeneratedQuestionValidationService
+from app.services.question_dedup_service import QuestionDedupService
 from app.services.rag_retrieval_service import RAGRetrievalService
 from app.services.topic_streak_service import TopicStreakService
 
@@ -119,6 +120,24 @@ def _next_theta(theta_before: float, is_correct: bool) -> float:
     return max(-4.0, min(4.0, theta_before + step))
 
 
+def _select_next_from_topic(
+    pool: list[Question],
+    asked_ids: set[int],
+    topic_id: int,
+    theta: float,
+) -> Question | None:
+    """Select the best unasked question from a specific topic.
+
+    Used when the exam is locked to a topic during the streak-building
+    phase.  Filters the pool to the given topic, then applies the
+    standard IRT selection.
+    """
+    topic_qs = [q for q in pool if q.subtopic.topic_id == topic_id and q.id not in asked_ids]
+    if not topic_qs:
+        return None
+    return _select_next_question(topic_qs, set(), theta)
+
+
 def _question_payload(db: Session, q: Question) -> dict:
     choices = db.query(Choice).filter(Choice.question_id == q.id).order_by(Choice.id.asc()).all()
     topic = db.query(Topic).filter(Topic.id == q.subtopic.topic_id).first()
@@ -138,11 +157,11 @@ def _question_payload(db: Session, q: Question) -> dict:
 def _map_difficulty_estimate(estimate: float | None) -> DifficultyLevel:
     if estimate is None:
         return DifficultyLevel.Medium
-    if estimate < 0.33:
+    if estimate < -0.5:
         return DifficultyLevel.Easy
-    if estimate < 0.66:
-        return DifficultyLevel.Medium
-    return DifficultyLevel.Hard
+    if estimate > 0.5:
+        return DifficultyLevel.Hard
+    return DifficultyLevel.Medium
 
 
 def _generated_question_payload(db: Session, gq: GeneratedQuestion) -> dict:
@@ -273,6 +292,13 @@ def _try_generate_next(db: Session, exam_id: int, topic_id: int, theta: float, s
     if not settings.RAG_ENABLED:
         return None
 
+    # --- LangGraph path (feature-flagged) ---
+    if settings.RAG_LANGGRAPH_ENABLED:
+        from app.services.langgraph_rag_workflow import run_rag_graph
+
+        return run_rag_graph(db, exam_id, topic_id, theta, student_id)
+
+    # --- Legacy inline path (default) ---
     streak_service = TopicStreakService(db, student_id)
     streak_info = streak_service.get_streak(exam_id, topic_id)
     if not streak_info.can_generate:
@@ -305,6 +331,15 @@ def _try_generate_next(db: Session, exam_id: int, topic_id: int, theta: float, s
         log.warning("Generated question failed validation: %s", v_report.issues)
         return None
 
+    dedup = QuestionDedupService()
+    dedup_report = dedup.check(db, topic_id=topic_id, question_text=gen_output.question_text)
+    if dedup_report.is_duplicate:
+        log.warning(
+            "Generated question is a duplicate: max_sim=%.3f, source=%s",
+            dedup_report.max_similarity, dedup_report.source,
+        )
+        return None
+
     gq = GeneratedQuestion(
         topic_id=topic_id,
         source_exam_id=exam_id,
@@ -320,6 +355,10 @@ def _try_generate_next(db: Session, exam_id: int, topic_id: int, theta: float, s
             "non_duplicate": v_report.non_duplicate,
             "max_similarity": v_report.max_similarity,
             "issues": v_report.issues,
+            "judge_feedback": v_report.judge_feedback,
+            "judge_ok": v_report.judge_ok,
+            "judge_ambiguity": v_report.judge_ambiguity,
+            "judge_factual_error": v_report.judge_factual_error,
         },
     )
     db.add(gq)
@@ -416,17 +455,8 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     db.add(exam)
     db.flush()
 
-    # Per-topic theta tracking for all answers
     ts_service = TopicStreakService(db, student_id)
     ts_service.update_topic_theta(exam_id, topic_id, theta_after)
-
-    # Track topic streak for regular questions
-    if not generated_q:
-        ts_service.record_answer(exam_id, topic_id, theta_after)
-
-    # Mark topic consumed after answering a generated question
-    if generated_q:
-        ts_service.mark_topic_consumed(exam_id, topic_id)
 
     answered = (
         db.query(AdaptiveExamResponse)
@@ -436,6 +466,150 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     )
     asked_ids = {r.question_id for r in answered if r.question_id is not None}
 
+    # ── Branch: answered a GENERATED question ──────────────────────
+    if generated_q:
+        ts_service.mark_topic_consumed(exam_id, topic_id)
+        exam.locked_topic_id = None
+        exam.pending_generated_question_id = None
+        db.add(exam)
+        db.flush()
+
+        if exam.answered_count >= exam.max_questions:
+            result = _build_result(exam, answered)
+            db.add(exam)
+            db.commit()
+            db.refresh(exam)
+            return _progress_payload(db, exam, result=result)
+
+        consumed_topic_ids = ts_service.get_consumed_topic_ids(exam_id)
+        available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
+        if not available_pool:
+            result = _build_result(exam, answered)
+            db.add(exam)
+            db.commit()
+            db.refresh(exam)
+            return _progress_payload(db, exam, result=result)
+
+        next_question = _select_next_question(available_pool, asked_ids, exam.current_theta)
+        if not next_question:
+            result = _build_result(exam, answered)
+            db.add(exam)
+            db.commit()
+            db.refresh(exam)
+            return _progress_payload(db, exam, result=result)
+
+        db.commit()
+        db.refresh(exam)
+        return _progress_payload(db, exam, next_question=next_question)
+
+    # ── Branch: answered a REGULAR question ────────────────────────
+    ts_service.record_answer(
+        exam_id, topic_id, theta_after,
+        before_order_index=exam.answered_count,
+    )
+
+    # If the student switched topics while a lock was active, clear it.
+    if exam.locked_topic_id is not None and exam.locked_topic_id != topic_id:
+        exam.locked_topic_id = None
+        ts_service.clear_generation_attempted(exam_id, topic_id)
+        db.add(exam)
+        db.flush()
+
+    streak_info = ts_service.get_streak(exam_id, topic_id)
+
+    # ── ISSUE 1 FIX: strict completion guard before any generation/lock routing ──
+    if exam.answered_count >= exam.max_questions:
+        exam.pending_generated_question_id = None
+        db.add(exam)
+        result = _build_result(exam, answered)
+        db.add(exam)
+        db.commit()
+        db.refresh(exam)
+        return _progress_payload(db, exam, result=result)
+
+    # ── Currently locked on this topic ─────────────────────────────
+    if exam.locked_topic_id == topic_id:
+        if streak_info.threshold_reached and not streak_info.generation_attempted:
+            next_generated = _try_generate_next(db, exam_id, topic_id, theta_after, student_id)
+            ts_service.mark_generation_attempted(exam_id, topic_id)
+            if next_generated:
+                exam.pending_generated_question_id = next_generated.id
+                db.add(exam)
+                db.commit()
+                db.refresh(exam)
+                return _progress_payload(db, exam, next_generated=next_generated)
+            # Generation failed — try one more regular Q from same topic
+            next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
+            if next_q:
+                db.commit()
+                db.refresh(exam)
+                return _progress_payload(db, exam, next_question=next_q)
+            # No eligible Qs — unlock and fall through
+            exam.locked_topic_id = None
+            db.add(exam)
+            db.flush()
+        elif not streak_info.threshold_reached:
+            # Streak still building — stay on this topic
+            next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
+            if next_q:
+                db.commit()
+                db.refresh(exam)
+                return _progress_payload(db, exam, next_question=next_q)
+            # Topic exhausted before threshold — unlock
+            exam.locked_topic_id = None
+            db.add(exam)
+            db.flush()
+        else:
+            # Threshold already reached and generation already attempted
+            # (e.g. generation failed, we served one retry, now moving on)
+            ts_service.mark_topic_consumed(exam_id, topic_id)
+            exam.locked_topic_id = None
+            db.add(exam)
+            db.flush()
+
+    # ── Not locked — decide whether to lock or free-select ─────────
+    else:
+        if not streak_info.threshold_reached and streak_info.current_streak > 0:
+            # Start / continue building a streak on this topic
+            exam.locked_topic_id = topic_id
+            db.add(exam)
+            db.flush()
+            next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
+            if next_q:
+                db.commit()
+                db.refresh(exam)
+                return _progress_payload(db, exam, next_question=next_q)
+            # Topic exhausted — unlock and free-select
+            exam.locked_topic_id = None
+            db.add(exam)
+            db.flush()
+
+        elif streak_info.threshold_reached and not streak_info.generation_attempted:
+            # Threshold just reached — attempt generation now
+            next_generated = _try_generate_next(db, exam_id, topic_id, theta_after, student_id)
+            ts_service.mark_generation_attempted(exam_id, topic_id)
+            if next_generated:
+                exam.locked_topic_id = None
+                exam.pending_generated_question_id = next_generated.id
+                db.add(exam)
+                db.commit()
+                db.refresh(exam)
+                return _progress_payload(db, exam, next_generated=next_generated)
+            # Generation failed — try one more regular Q from same topic
+            exam.locked_topic_id = topic_id
+            db.add(exam)
+            db.flush()
+            next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
+            if next_q:
+                db.commit()
+                db.refresh(exam)
+                return _progress_payload(db, exam, next_question=next_q)
+            # No eligible Qs — unlock
+            exam.locked_topic_id = None
+            db.add(exam)
+            db.flush()
+
+    # ── Free selection across all available topics ──────────────────
     if exam.answered_count >= exam.max_questions:
         result = _build_result(exam, answered)
         db.add(exam)
@@ -443,14 +617,6 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
         db.refresh(exam)
         return _progress_payload(db, exam, result=result)
 
-    # Try topic-aware generation if enabled
-    next_generated = _try_generate_next(db, exam_id, topic_id, theta_after, student_id) if not generated_q else None
-    if next_generated:
-        db.commit()
-        db.refresh(exam)
-        return _progress_payload(db, exam, next_generated=next_generated)
-
-    # Filter out consumed topics from the pool
     consumed_topic_ids = ts_service.get_consumed_topic_ids(exam_id)
     available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
     selection_theta = 0.0 if consumed_topic_ids else exam.current_theta
@@ -498,10 +664,40 @@ def get_adaptive_exam(db: Session, student_id: int, exam_id: int) -> dict:
         }
         return _progress_payload(db, exam, None, result=result)
 
+    # ── ISSUE 2 FIX: restore pending generated question if still unanswered ──
+    if exam.pending_generated_question_id is not None:
+        pending_gq = (
+            db.query(GeneratedQuestion)
+            .filter(GeneratedQuestion.id == exam.pending_generated_question_id)
+            .first()
+        )
+        if pending_gq is not None:
+            already_answered = (
+                db.query(AdaptiveExamResponse)
+                .filter(
+                    AdaptiveExamResponse.adaptive_exam_id == exam.id,
+                    AdaptiveExamResponse.generated_question_id == pending_gq.id,
+                )
+                .first()
+            )
+            if already_answered is None:
+                return _progress_payload(db, exam, next_generated=pending_gq, result=None)
+            # Already answered — stale pending state, clear it
+            exam.pending_generated_question_id = None
+            db.add(exam)
+            db.flush()
+
     pool = _get_phase_question_pool(db, exam.phase_id, seed_missing_irt=False)
     ts_service = TopicStreakService(db, student_id)
     consumed_topic_ids = ts_service.get_consumed_topic_ids(exam_id)
     available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
     asked_ids = {r.question_id for r in answered}
+
+    # If locked to a topic, prefer selecting from that topic
+    if exam.locked_topic_id is not None and exam.locked_topic_id not in consumed_topic_ids:
+        next_question = _select_next_from_topic(available_pool, asked_ids, exam.locked_topic_id, exam.current_theta)
+        if next_question:
+            return _progress_payload(db, exam, next_question, result=None)
+
     next_question = _select_next_question(available_pool, asked_ids, exam.current_theta)
     return _progress_payload(db, exam, next_question, result=None)

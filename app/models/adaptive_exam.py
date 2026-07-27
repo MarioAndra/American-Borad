@@ -24,6 +24,12 @@ class AdaptiveExam(Base):
     started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     submitted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    locked_topic_id: Mapped[int | None] = mapped_column(
+        ForeignKey("topics.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    pending_generated_question_id: Mapped[int | None] = mapped_column(
+        ForeignKey("generated_questions.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
 
     responses: Mapped[list["AdaptiveExamResponse"]] = relationship(
         back_populates="exam",

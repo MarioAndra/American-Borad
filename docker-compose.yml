@@ -32,6 +32,8 @@ services:
       - "8000:8000"
     env_file: .env
     volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
       - ./courses:/app/courses
       - ./.env:/app/.env
       - ./app/data:/app/data

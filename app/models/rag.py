@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -93,6 +93,12 @@ class GeneratedQuestionReview(Base):
 
 class StudentTopicProgress(Base):
     __tablename__ = "student_topic_progress"
+    __table_args__ = (
+        UniqueConstraint(
+            "student_id", "exam_id", "topic_id",
+            name="uq_student_exam_topic",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -104,4 +110,5 @@ class StudentTopicProgress(Base):
     avg_theta: Mapped[float | None] = mapped_column(Float, nullable=True)
     current_theta: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     consumed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    generation_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

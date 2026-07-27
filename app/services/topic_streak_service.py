@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -21,6 +23,7 @@ class StreakInfo:
     avg_theta: float | None
     threshold_reached: bool
     can_generate: bool
+    generation_attempted: bool
 
 
 class TopicStreakService:
@@ -31,10 +34,19 @@ class TopicStreakService:
         self._streak_threshold = self.settings.PHASE2_SUBTOPIC_BASE_QUESTION_COUNT
         self._max_generated = self.settings.PHASE2_SUBTOPIC_GENERATED_QUESTION_COUNT
 
-    def record_answer(self, exam_id: int, topic_id: int, theta: float) -> StreakInfo:
+    def record_answer(
+        self,
+        exam_id: int,
+        topic_id: int,
+        theta: float,
+        *,
+        before_order_index: int | None = None,
+    ) -> StreakInfo:
         progress = self._get_progress(exam_id, topic_id)
 
-        prev_topic_id = self._previous_topic(exam_id)
+        prev_topic_id = self._previous_topic(
+            exam_id, before_order_index=before_order_index,
+        )
         if prev_topic_id is not None and prev_topic_id != topic_id:
             self._reset_topic_progress(exam_id, prev_topic_id)
 
@@ -60,36 +72,98 @@ class TopicStreakService:
         progress.generated_count += 1
         self.db.flush()
 
+    def mark_generation_attempted(self, exam_id: int, topic_id: int) -> None:
+        """Mark that a generation attempt was made for this topic/streak.
+
+        Called after both successful and failed generation attempts to
+        prevent infinite retry loops within the same streak window.
+        """
+        progress = self._get_progress(exam_id, topic_id)
+        progress.generation_attempted = True
+        self.db.flush()
+
+    def clear_generation_attempted(self, exam_id: int, topic_id: int) -> None:
+        """Clear the generation-attempted flag (e.g. on streak reset)."""
+        progress = self._get_progress(exam_id, topic_id)
+        progress.generation_attempted = False
+        self.db.flush()
+
     def _get_progress(self, exam_id: int, topic_id: int) -> StudentTopicProgress:
         progress = (
             self.db.query(StudentTopicProgress)
             .filter(
                 StudentTopicProgress.exam_id == exam_id,
                 StudentTopicProgress.topic_id == topic_id,
+                StudentTopicProgress.student_id == self.student_id,
             )
             .first()
         )
-        if not progress:
-            progress = StudentTopicProgress(
-                student_id=self.student_id,
-                exam_id=exam_id,
-                topic_id=topic_id,
-                current_streak=0,
-                questions_asked=0,
-                generated_count=0,
-                avg_theta=None,
+        if progress is not None:
+            return progress
+
+        insert_values = {
+            "student_id": self.student_id,
+            "exam_id": exam_id,
+            "topic_id": topic_id,
+            "current_streak": 0,
+            "questions_asked": 0,
+            "generated_count": 0,
+            "avg_theta": None,
+            "current_theta": 0.0,
+            "consumed": False,
+            "generation_attempted": False,
+        }
+        conn = self.db.connection()
+        savepoint = conn.begin_nested()
+        try:
+            conn.execute(
+                insert(StudentTopicProgress).values(**insert_values),
             )
-            self.db.add(progress)
-            self.db.flush()
+            savepoint.commit()
+        except IntegrityError:
+            savepoint.rollback()
+        progress = (
+            self.db.query(StudentTopicProgress)
+            .filter(
+                StudentTopicProgress.exam_id == exam_id,
+                StudentTopicProgress.topic_id == topic_id,
+                StudentTopicProgress.student_id == self.student_id,
+            )
+            .first()
+        )
+        if progress is None:
+            raise RuntimeError(
+                "StudentTopicProgress recovery failed after duplicate insert race",
+            )
         return progress
 
-    def _previous_topic(self, exam_id: int) -> int | None:
-        last = (
+    def _previous_topic(
+        self,
+        exam_id: int,
+        *,
+        before_order_index: int | None = None,
+    ) -> int | None:
+        """Return the topic_id of the most recent *regular* (non-generated)
+        answer before ``before_order_index``.
+
+        Only regular questions contribute to the streak, so generated
+        questions are excluded from this lookup.  When
+        ``before_order_index`` is given, only answers with a strictly
+        smaller ``order_index`` are considered — this prevents the
+        just-flushed current answer from being treated as "previous".
+        """
+        query = (
             self.db.query(AdaptiveExamResponse)
-            .filter(AdaptiveExamResponse.adaptive_exam_id == exam_id)
-            .order_by(AdaptiveExamResponse.order_index.desc())
-            .first()
+            .filter(
+                AdaptiveExamResponse.adaptive_exam_id == exam_id,
+                AdaptiveExamResponse.question_id.isnot(None),
+            )
         )
+        if before_order_index is not None:
+            query = query.filter(
+                AdaptiveExamResponse.order_index < before_order_index,
+            )
+        last = query.order_by(AdaptiveExamResponse.order_index.desc()).first()
         if not last:
             return None
         q = last.question
@@ -99,7 +173,7 @@ class TopicStreakService:
         self.db.query(StudentTopicProgress).filter(
             StudentTopicProgress.exam_id == exam_id,
             StudentTopicProgress.topic_id == topic_id,
-        ).update({"current_streak": 0})
+        ).update({"current_streak": 0, "generation_attempted": False})
         self.db.flush()
 
     def update_topic_theta(self, exam_id: int, topic_id: int, theta: float) -> None:
@@ -142,4 +216,5 @@ class TopicStreakService:
             avg_theta=progress.avg_theta,
             threshold_reached=threshold_reached,
             can_generate=can_generate,
+            generation_attempted=progress.generation_attempted,
         )

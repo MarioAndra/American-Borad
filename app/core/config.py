@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     RAG_REVIEW_REQUIRED: bool = False
     RAG_ALLOW_VECTOR_FALLBACK: bool = False
     RAG_OCR_ENABLED: bool = False
+    RAG_LANGGRAPH_ENABLED: bool = False
 
     # External API keys
     OPENAI_API_KEY: Optional[str] = None
