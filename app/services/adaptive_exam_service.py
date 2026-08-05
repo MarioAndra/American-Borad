@@ -226,7 +226,33 @@ def _progress_payload(
         "result": result,
         "started_at": exam.started_at,
         "submitted_at": exam.submitted_at,
+        "current_question_started_at": exam.current_question_started_at,
     }
+
+
+def _mark_question_served(
+    exam: AdaptiveExam,
+    *,
+    question_id: int | None = None,
+    generated_question_id: int | None = None,
+) -> None:
+    """Record which question the current serve timer belongs to.
+
+    Must be called before commit whenever a question is served so the
+    backend can later attribute measured elapsed time to the exact
+    question being answered.  The timestamp is always the serve moment
+    (UTC) — it is never invented or backfilled elsewhere.
+    """
+    exam.current_question_id = question_id
+    exam.current_generated_question_id = generated_question_id
+    exam.current_question_started_at = datetime.now(timezone.utc)
+
+
+def _clear_current_question(exam: AdaptiveExam) -> None:
+    """Clear the tracked served-question state (identity + timestamp)."""
+    exam.current_question_id = None
+    exam.current_generated_question_id = None
+    exam.current_question_started_at = None
 
 
 def start_adaptive_exam(db: Session, student_id: int, phase_id: int | None) -> dict:
@@ -274,6 +300,9 @@ def start_adaptive_exam(db: Session, student_id: int, phase_id: int | None) -> d
     if not first_question:
         raise ValueError("Could not initialize adaptive exam")
 
+    exam.current_question_id = first_question.id
+    exam.current_generated_question_id = None
+    exam.current_question_started_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(exam)
     return _progress_payload(db, exam, first_question, result=None)
@@ -381,7 +410,13 @@ def _try_generate_next(db: Session, exam_id: int, topic_id: int, theta: float, s
     return gq
 
 
-def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_id: int, choice_id: int) -> dict:
+def submit_adaptive_answer(
+    db: Session,
+    student_id: int,
+    exam_id: int,
+    question_id: int,
+    choice_id: int,
+) -> dict:
     exam = db.query(AdaptiveExam).filter(AdaptiveExam.id == exam_id, AdaptiveExam.student_id == student_id).first()
     if not exam:
         raise ValueError("Adaptive exam not found")
@@ -437,6 +472,33 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     theta_before = float(exam.current_theta)
     theta_after = _next_theta(theta_before, is_correct)
 
+    # ── Server-side elapsed time (authoritative, never trusts client) ──
+    # Trusted only when the exact served question identity matches the
+    # submitted question AND the server-owned serve timestamp exists.
+    # Otherwise timing is marked untrusted and anomaly scoring is skipped
+    # — never guess or backfill a serve time.
+    now = datetime.now(timezone.utc)
+    tracked_id = exam.current_question_id if q is not None else exam.current_generated_question_id
+    if tracked_id is not None and tracked_id != question_id:
+        timing_trusted = False
+        timing_issue = "question_mismatch"
+        server_elapsed = None
+    elif tracked_id is None:
+        other_tracked = (
+            exam.current_generated_question_id if q is not None else exam.current_question_id
+        )
+        timing_trusted = False
+        timing_issue = "question_mismatch" if other_tracked is not None else "no_tracked_question"
+        server_elapsed = None
+    elif exam.current_question_started_at is None:
+        timing_trusted = False
+        timing_issue = "missing_serve_timestamp"
+        server_elapsed = None
+    else:
+        timing_trusted = True
+        timing_issue = None
+        server_elapsed = max((now - exam.current_question_started_at).total_seconds(), 0.0)
+
     ans = AdaptiveExamResponse(
         adaptive_exam_id=exam.id,
         question_id=question_id if q else None,
@@ -447,7 +509,44 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
         is_correct=is_correct,
         theta_before=theta_before,
         theta_after=theta_after,
+        elapsed_seconds=server_elapsed,
+        timing_trusted=timing_trusted,
+        timing_issue=timing_issue,
     )
+
+    # ── Anomaly detection (Phase II correct answers only, regular Qs,
+    #    and only when timing is trusted) ──
+    if is_correct and q is not None and timing_trusted:
+        try:
+            from app.services.anomaly_detection_service import score_response
+
+            irt_b = float(q.irt_b) if q.irt_b is not None else 0.0
+            result = score_response(
+                student_ability=theta_before,
+                question_difficulty=irt_b,
+                elapsed_seconds=server_elapsed,
+            )
+            if result is not None:
+                ans.anomaly_flag = bool(result["anomaly_flag"])
+                ans.anomaly_score = result["anomaly_score"]
+                ans.predicted_class = result["predicted_class"]
+                ans.response_interpretation = result["response_interpretation"]
+            else:
+                log.warning(
+                    "Anomaly scoring returned None for exam=%d question=%d, skipping persistence",
+                    exam.id, question_id,
+                )
+        except Exception:
+            log.exception(
+                "Anomaly detection hook failed for exam=%d question=%d — exam flow continues",
+                exam.id, question_id,
+            )
+    elif is_correct and q is not None:
+        log.warning(
+            "Anomaly scoring skipped for exam=%d question=%d — untrusted timing (%s)",
+            exam.id, question_id, timing_issue,
+        )
+
     db.add(ans)
 
     exam.answered_count += 1
@@ -475,6 +574,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
         db.flush()
 
         if exam.answered_count >= exam.max_questions:
+            _clear_current_question(exam)
             result = _build_result(exam, answered)
             db.add(exam)
             db.commit()
@@ -484,6 +584,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
         consumed_topic_ids = ts_service.get_consumed_topic_ids(exam_id)
         available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
         if not available_pool:
+            _clear_current_question(exam)
             result = _build_result(exam, answered)
             db.add(exam)
             db.commit()
@@ -492,12 +593,14 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
 
         next_question = _select_next_question(available_pool, asked_ids, exam.current_theta)
         if not next_question:
+            _clear_current_question(exam)
             result = _build_result(exam, answered)
             db.add(exam)
             db.commit()
             db.refresh(exam)
             return _progress_payload(db, exam, result=result)
 
+        _mark_question_served(exam, question_id=next_question.id)
         db.commit()
         db.refresh(exam)
         return _progress_payload(db, exam, next_question=next_question)
@@ -520,7 +623,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     # ── ISSUE 1 FIX: strict completion guard before any generation/lock routing ──
     if exam.answered_count >= exam.max_questions:
         exam.pending_generated_question_id = None
-        db.add(exam)
+        _clear_current_question(exam)
         result = _build_result(exam, answered)
         db.add(exam)
         db.commit()
@@ -534,6 +637,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
             ts_service.mark_generation_attempted(exam_id, topic_id)
             if next_generated:
                 exam.pending_generated_question_id = next_generated.id
+                _mark_question_served(exam, generated_question_id=next_generated.id)
                 db.add(exam)
                 db.commit()
                 db.refresh(exam)
@@ -541,6 +645,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
             # Generation failed — try one more regular Q from same topic
             next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
             if next_q:
+                _mark_question_served(exam, question_id=next_q.id)
                 db.commit()
                 db.refresh(exam)
                 return _progress_payload(db, exam, next_question=next_q)
@@ -552,6 +657,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
             # Streak still building — stay on this topic
             next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
             if next_q:
+                _mark_question_served(exam, question_id=next_q.id)
                 db.commit()
                 db.refresh(exam)
                 return _progress_payload(db, exam, next_question=next_q)
@@ -576,6 +682,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
             db.flush()
             next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
             if next_q:
+                _mark_question_served(exam, question_id=next_q.id)
                 db.commit()
                 db.refresh(exam)
                 return _progress_payload(db, exam, next_question=next_q)
@@ -591,6 +698,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
             if next_generated:
                 exam.locked_topic_id = None
                 exam.pending_generated_question_id = next_generated.id
+                _mark_question_served(exam, generated_question_id=next_generated.id)
                 db.add(exam)
                 db.commit()
                 db.refresh(exam)
@@ -601,6 +709,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
             db.flush()
             next_q = _select_next_from_topic(pool, asked_ids, topic_id, theta_after)
             if next_q:
+                _mark_question_served(exam, question_id=next_q.id)
                 db.commit()
                 db.refresh(exam)
                 return _progress_payload(db, exam, next_question=next_q)
@@ -611,6 +720,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
 
     # ── Free selection across all available topics ──────────────────
     if exam.answered_count >= exam.max_questions:
+        _clear_current_question(exam)
         result = _build_result(exam, answered)
         db.add(exam)
         db.commit()
@@ -622,6 +732,7 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
     selection_theta = 0.0 if consumed_topic_ids else exam.current_theta
 
     if not available_pool:
+        _clear_current_question(exam)
         result = _build_result(exam, answered)
         db.add(exam)
         db.commit()
@@ -630,12 +741,14 @@ def submit_adaptive_answer(db: Session, student_id: int, exam_id: int, question_
 
     next_question = _select_next_question(available_pool, asked_ids, selection_theta)
     if not next_question:
+        _clear_current_question(exam)
         result = _build_result(exam, answered)
         db.add(exam)
         db.commit()
         db.refresh(exam)
         return _progress_payload(db, exam, result=result)
 
+    _mark_question_served(exam, question_id=next_question.id)
     db.commit()
     db.refresh(exam)
     return _progress_payload(db, exam, next_question=next_question)
@@ -681,11 +794,22 @@ def get_adaptive_exam(db: Session, student_id: int, exam_id: int) -> dict:
                 .first()
             )
             if already_answered is None:
+                # Align the tracked identity with the question we return, but
+                # NEVER fabricate a serve timestamp — if the original serve
+                # time is missing, the next answer is recorded as untrusted
+                # and anomaly scoring is skipped for it.
+                if exam.current_generated_question_id != pending_gq.id:
+                    exam.current_generated_question_id = pending_gq.id
+                    exam.current_question_id = None
+                    db.add(exam)
+                    db.commit()
+                    db.refresh(exam)
                 return _progress_payload(db, exam, next_generated=pending_gq, result=None)
             # Already answered — stale pending state, clear it
             exam.pending_generated_question_id = None
             db.add(exam)
-            db.flush()
+            db.commit()
+            db.refresh(exam)
 
     pool = _get_phase_question_pool(db, exam.phase_id, seed_missing_irt=False)
     ts_service = TopicStreakService(db, student_id)
@@ -693,11 +817,39 @@ def get_adaptive_exam(db: Session, student_id: int, exam_id: int) -> dict:
     available_pool = [q for q in pool if q.subtopic.topic_id not in consumed_topic_ids]
     asked_ids = {r.question_id for r in answered}
 
+    # Resume the previously served, unanswered regular question so timing
+    # stays attributable to that exact serve.  Do NOT backfill a missing
+    # serve timestamp — a missing timestamp means the next answer is
+    # timing-untrusted.
+    if exam.current_question_id is not None:
+        resume_q = next((q for q in pool if q.id == exam.current_question_id), None)
+        if resume_q is not None and resume_q.id not in asked_ids:
+            return _progress_payload(db, exam, resume_q, result=None)
+        # Tracked question is stale (already answered / no longer in pool) —
+        # clear it and fall through to a fresh serve.  Commit so the repair
+        # persists; a flush alone is lost when the request session closes.
+        exam.current_question_id = None
+        exam.current_generated_question_id = None
+        exam.current_question_started_at = None
+        db.add(exam)
+        db.commit()
+        db.refresh(exam)
+
     # If locked to a topic, prefer selecting from that topic
     if exam.locked_topic_id is not None and exam.locked_topic_id not in consumed_topic_ids:
         next_question = _select_next_from_topic(available_pool, asked_ids, exam.locked_topic_id, exam.current_theta)
         if next_question:
+            _mark_question_served(exam, question_id=next_question.id)
+            db.add(exam)
+            db.commit()
+            db.refresh(exam)
             return _progress_payload(db, exam, next_question, result=None)
 
     next_question = _select_next_question(available_pool, asked_ids, exam.current_theta)
+    if next_question:
+        _mark_question_served(exam, question_id=next_question.id)
+        db.add(exam)
+        db.commit()
+        db.refresh(exam)
+        return _progress_payload(db, exam, next_question, result=None)
     return _progress_payload(db, exam, next_question, result=None)

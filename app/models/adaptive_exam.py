@@ -30,6 +30,13 @@ class AdaptiveExam(Base):
     pending_generated_question_id: Mapped[int | None] = mapped_column(
         ForeignKey("generated_questions.id", ondelete="SET NULL"), nullable=True, index=True,
     )
+    current_question_started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_question_id: Mapped[int | None] = mapped_column(
+        ForeignKey("questions.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    current_generated_question_id: Mapped[int | None] = mapped_column(
+        ForeignKey("generated_questions.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
 
     responses: Mapped[list["AdaptiveExamResponse"]] = relationship(
         back_populates="exam",

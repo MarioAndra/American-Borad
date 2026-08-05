@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, UniqueConstraint, func, text as sa_text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, func, text as sa_text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -23,6 +23,20 @@ class AdaptiveExamResponse(Base):
     theta_before: Mapped[float] = mapped_column(Float, nullable=False)
     theta_after: Mapped[float] = mapped_column(Float, nullable=False)
     answered_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # ── Anomaly detection fields (Phase II only) ────────────────────
+    anomaly_flag: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    anomaly_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_class: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    response_interpretation: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    elapsed_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Timing trust state (Phase II only) ──────────────────────────
+    # timing_trusted=False means elapsed_seconds was NOT measured from a
+    # server-owned serve timestamp attributable to this exact question,
+    # so anomaly scoring was skipped.  timing_issue records the reason.
+    timing_trusted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    timing_issue: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     exam: Mapped["AdaptiveExam"] = relationship(back_populates="responses")
     question: Mapped["Question"] = relationship()
