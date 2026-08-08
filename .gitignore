@@ -29,6 +29,11 @@ htmlcov/
 *.sqlite3
 alembic/versions/__pycache__/
 
+# Large ML weights — 475 MiB model exceeds GitHub's 100 MiB file limit.
+# Kept out of git; re-host (GitHub Release / HuggingFace) and download at setup.
+app/services/mcq_difficulty_roberta/model.safetensors
+app/services/mcq_difficulty_roberta/*.safetensors
+
 American.postman_collection.json
 Prof Proposal.md
 Implementation plan.md
