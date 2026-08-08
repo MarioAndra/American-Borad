@@ -291,6 +291,53 @@ def generate(state: RAGGraphState) -> dict:
         }
 
 
+def difficulty_estimator(state: RAGGraphState) -> dict:
+    """Override the LLM-reported difficulty with the local RoBERTa model.
+
+    Runs right after ``generate`` so every downstream consumer
+    (``difficulty_calibrator``, repair routing, ``persist``) sees the
+    model-derived estimate on ``gen_output.difficulty_estimate``.
+
+    Best-effort: any failure keeps the LLM estimate and the graph continues.
+    With ``MCQ_DIFFICULTY_MODEL_FAIL_OPEN=false`` a model failure blocks.
+    """
+    gen_output = state.get("gen_output")
+    if not gen_output:
+        return {
+            "failure_reason": "Difficulty estimator skipped: no gen_output",
+            "failure_code": "difficulty_estimator_skipped_no_output",
+        }
+
+    try:
+        from app.services.mcq_difficulty_service import estimate_generated_difficulty
+
+        prediction = estimate_generated_difficulty(gen_output)
+        if prediction is None:
+            return {}
+        gen_output.difficulty_estimate = prediction.logit
+        log.info(
+            "DifficultyEstimator OVERRIDE: label=%s logit=%.3f confidence=%.4f",
+            prediction.label, prediction.logit, prediction.confidence,
+        )
+        return {
+            "difficulty_model_report": {
+                "label": prediction.label,
+                "logit": prediction.logit,
+                "confidence": prediction.confidence,
+                "probabilities": prediction.probabilities,
+            }
+        }
+    except Exception:
+        log.exception(
+            "DifficultyEstimator node failed — keeping LLM estimate "
+            "(fail-closed if configured)"
+        )
+        return {
+            "failure_reason": "Difficulty estimator raised an exception",
+            "failure_code": "difficulty_estimator_exception",
+        }
+
+
 def grounding_validator(state: RAGGraphState) -> dict:
     """Check that the generated question is grounded in retrieved evidence.
 
@@ -888,6 +935,10 @@ def _create_generated_question(db, state, gen_output, v_report, settings):  # ty
             "issues": difficulty_report.issues,
         }
 
+    difficulty_model_report = state.get("difficulty_model_report")
+    if difficulty_model_report is not None:
+        vr_dict["difficulty_model"] = difficulty_model_report
+
     repair_attempt_count = state.get("repair_attempt_count", 0)
     if repair_attempt_count > 0:
         vr_dict["repair"] = {
@@ -994,6 +1045,12 @@ def _after_evidence_gate(state: RAGGraphState) -> str:
 def _after_generate(state: RAGGraphState) -> str:
     if state.get("failure_reason"):
         return END
+    return "difficulty_estimator"
+
+
+def _after_difficulty_estimator(state: RAGGraphState) -> str:
+    if state.get("failure_reason"):
+        return END
     return "grounding_validator"
 
 
@@ -1071,6 +1128,7 @@ _GRAPH_NODES = [
     ("evidence_gate", evidence_gate),
     ("retrieval_repair", retrieval_repair),
     ("generate", generate),
+    ("difficulty_estimator", difficulty_estimator),
     ("grounding_validator", grounding_validator),
     ("validate", validate),
     ("distractor_validator", distractor_validator),
@@ -1090,7 +1148,8 @@ _CONDITIONAL_EDGES = [
     ("reranker", _after_reranker, {"context_compressor": "context_compressor"}),
     ("context_compressor", _after_context_compressor, {"evidence_gate": "evidence_gate"}),
     ("evidence_gate", _after_evidence_gate, {"generate": "generate", "retrieval_repair": "retrieval_repair", END: END}),
-    ("generate", _after_generate, {"grounding_validator": "grounding_validator", END: END}),
+    ("generate", _after_generate, {"difficulty_estimator": "difficulty_estimator", END: END}),
+    ("difficulty_estimator", _after_difficulty_estimator, {"grounding_validator": "grounding_validator", END: END}),
     ("grounding_validator", _after_grounding_validator, {"validate": "validate", END: END}),
     ("validate", _after_validate, {"distractor_validator": "distractor_validator", END: END}),
     ("distractor_validator", _after_distractor_validator, {"difficulty_calibrator": "difficulty_calibrator", END: END}),

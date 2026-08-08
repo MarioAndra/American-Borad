@@ -11,21 +11,13 @@ from app.models import (
     Choice,
     ABETCriterion,
     DifficultyLevel,
-    CognitiveLevel,
 )
+from app.models.enums import cognitive_level_from_value
 
 DIFFICULTY_MAP = {
     "Easy": DifficultyLevel.Easy,
     "Medium": DifficultyLevel.Medium,
     "Hard": DifficultyLevel.Hard,
-}
-
-COGNITIVE_MAP = {
-    "Remember": CognitiveLevel.Knowledge,
-    "Understand": CognitiveLevel.Application,
-    "Analyze": CognitiveLevel.Analysis,
-    "Apply": CognitiveLevel.Application,
-    "Evaluate": CognitiveLevel.Analysis,
 }
 
 
@@ -125,10 +117,7 @@ def import_excel(file_path: str, created_by_user_id: int | None = None):
                 raise ValueError(f"Invalid difficulty at row {idx + 2}")
             difficulty = DIFFICULTY_MAP[difficulty_raw]
 
-            cognitive_raw = str(row["cognitive_level"]).strip()
-            if cognitive_raw not in COGNITIVE_MAP:
-                raise ValueError(f"Invalid cognitive level at row {idx + 2}")
-            cognitive = COGNITIVE_MAP[cognitive_raw]
+            cognitive = cognitive_level_from_value(str(row["cognitive_level"]))
 
             qtype_raw = str(row["question_type"]).strip()
             qtype = qtype_raw

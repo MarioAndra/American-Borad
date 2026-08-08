@@ -13,6 +13,11 @@ python-multipart>=0.0.7,<0.1
 email-validator>=2.0.0
 catsim>=0.17,<1.0
 
+# Bloom taxonomy classifier (local Hugging Face inference)
+transformers>=4.52,<6.0
+torch>=2.6,<3.0
+sentencepiece>=0.2,<1.0
+
 # RAG / AI
 openai>=1.55,<2.0
 google-genai>=1.0,<2.0

@@ -17,9 +17,9 @@ from app.models import (
     Question,
     Choice,
     DifficultyLevel,
-    CognitiveLevel,
     QuestionType,
 )
+from app.models.enums import cognitive_level_from_value
 
 
 logger = logging.getLogger("excel_import")
@@ -160,7 +160,7 @@ class ExcelQuestionImporter:
 
         # Enums
         difficulty = _map_enum(DifficultyLevel, str(row["difficulty"]), "difficulty")
-        cognitive = _map_enum(CognitiveLevel, str(row["cognitive_level"]), "cognitive_level")
+        cognitive = cognitive_level_from_value(str(row["cognitive_level"]))
         qtype = _normalize(str(row["question_type"]))
 
         # Hierarchy

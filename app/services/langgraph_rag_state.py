@@ -53,6 +53,9 @@ class RAGGraphState(TypedDict, total=False):
     # --- Difficulty calibration output ---
     difficulty_report: DifficultyCalibrationReport | None
 
+    # --- RoBERTa difficulty-model override (telemetry only) ---
+    difficulty_model_report: dict | None
+
     # --- Artifact validation output ---
     artifact_report: ArtifactValidationReport | None
 

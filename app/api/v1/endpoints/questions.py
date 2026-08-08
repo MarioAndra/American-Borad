@@ -1,18 +1,42 @@
-# Questions endpoints placeholder.
-#
-# Responsibility:
-# - Expose endpoints for:
-#   - GET /questions: list questions with filters (phase, topic, subtopic, difficulty, cognitive_level, type, ABET, active).
-#   - POST /questions: create question with choices (admin only).
-#   - GET /questions/{id}: retrieve a question and its choices.
-#   - PATCH /questions/{id}: update question/choices (admin only).
-#   - DELETE /questions/{id}: soft-delete/deactivate (admin only).
-# - Utilize question_service and role-based access control.
-#
-# Planned contents:
-# - APIRouter with RBAC dependencies and pagination helpers.
-# - Pydantic request/response schemas from app.schemas.
-# - Validation to ensure SingleChoice has exactly one correct option; MultipleSelect may have several.
-#
-# Limitations (skeleton phase):
-# - No FastAPI route code implemented.
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.core.dependencies import require_roles
+from app.db.session import get_db
+from app.models import User
+from app.schemas.question import QuestionCreate, QuestionResponse
+from app.services import question_service
+
+router = APIRouter()
+
+
+@router.post(
+    "",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_question(
+    payload: QuestionCreate,
+    admin: User = Depends(require_roles("Admin")),
+    db: Session = Depends(get_db),
+) -> QuestionResponse:
+    try:
+        question = question_service.create_question(db, payload, created_by=admin)
+    except question_service.QuestionValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except question_service.QuestionDuplicateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except question_service.QuestionClassificationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return question

@@ -354,6 +354,26 @@ def _try_generate_next(db: Session, exam_id: int, topic_id: int, theta: float, s
         log.info("Generation produced no output for topic %d", topic_id)
         return None
 
+    # RoBERTa difficulty override (best-effort, fail-open): replace the
+    # LLM-reported estimate with a model-derived probability-weighted logit
+    # so the calibrator/repair gates judge real predicted difficulty.
+    try:
+        if get_settings().MCQ_DIFFICULTY_MODEL_ENABLED:
+            from app.services.mcq_difficulty_service import estimate_generated_difficulty
+
+            prediction = estimate_generated_difficulty(gen_output)
+            if prediction is not None:
+                log.info(
+                    "DifficultyEstimator OVERRIDE (legacy): label=%s logit=%.3f confidence=%.4f",
+                    prediction.label, prediction.logit, prediction.confidence,
+                )
+                gen_output.difficulty_estimate = prediction.logit
+    except Exception:
+        log.exception(
+            "Difficulty override failed for topic %d — keeping LLM estimate",
+            topic_id,
+        )
+
     validation = GeneratedQuestionValidationService(db)
     v_report = validation.validate(gen_output.question_text, gen_output.options, gen_output.explanation)
     if not v_report.valid:

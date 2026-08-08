@@ -1,14 +1,52 @@
-# Pydantic schemas for questions.
-#
-# Responsibility:
-# - Represent question data with difficulty, cognitive level, type, and taxonomy references.
-# - Include additional metadata fields: explanation, common_mistake, skill_gap.
-#
-# Planned contents:
-# - Difficulty, CognitiveLevel, QuestionType enums mirroring app.models.enums.
-# - QuestionBase, QuestionCreate (subtopic_id, abet criterion id, choices), QuestionRead.
-# - Include nested choices for read if required.
-# - Support multi-correct selection for MultipleSelect questions.
-#
-# Limitations (skeleton phase):
-# - No Pydantic classes implemented.
+from __future__ import annotations
+
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.enums import CognitiveLevel, DifficultyLevel, QuestionType
+
+
+class ChoiceCreate(BaseModel):
+    text: str
+    is_correct: bool = False
+
+
+class ChoiceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    text: str
+    is_correct: bool
+
+
+class QuestionCreate(BaseModel):
+    # cognitive_level is intentionally absent: it is server-owned and derived
+    # from the Bloom classifier at creation time.
+    text: str
+    difficulty: DifficultyLevel
+    question_type: QuestionType
+    subtopic_id: int
+    abet_criterion_id: int | None = None
+    explanation: str | None = None
+    common_mistake: str | None = None
+    skill_gap: str | None = None
+    choices: list[ChoiceCreate] = Field(min_length=2)
+
+
+class QuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    text: str
+    difficulty: DifficultyLevel
+    cognitive_level: CognitiveLevel
+    question_type: str
+    subtopic_id: int
+    abet_criterion_id: int | None
+    explanation: str | None
+    common_mistake: str | None
+    skill_gap: str | None
+    is_active: bool
+    created_at: datetime
+    choices: list[ChoiceRead]

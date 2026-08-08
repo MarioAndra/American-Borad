@@ -37,6 +37,7 @@ services:
       - ./courses:/app/courses
       - ./.env:/app/.env
       - ./app/data:/app/data
+      - ../final_bloom_deberta-20260626T190536Z-3-001/final_bloom_deberta:/app/models/bloom_deberta
     depends_on:
       db:
         condition: service_healthy

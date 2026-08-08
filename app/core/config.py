@@ -77,6 +77,23 @@ class Settings(BaseSettings):
     RAG_OCR_ENABLED: bool = False
     RAG_LANGGRAPH_ENABLED: bool = False
 
+    # Bloom taxonomy classifier (local DeBERTa) — disabled by default.
+    # Enable it and set BLOOM_MODEL_PATH to a local model directory to use it.
+    BLOOM_MODEL_ENABLED: bool = False
+    BLOOM_MODEL_PATH: Optional[str] = None
+    BLOOM_MODEL_DEVICE: str = "auto"
+    BLOOM_MODEL_RETURN_PROBABILITIES: bool = False
+    BLOOM_MODEL_FAIL_OPEN: bool = False
+
+    # MCQ difficulty classifier (local RoBERTa) — disabled by default.
+    # Overrides the LLM-reported difficulty_estimate on RAG-generated questions.
+    # When unset, MCQ_DIFFICULTY_MODEL_PATH falls back to the bundled
+    # app/services/mcq_difficulty_roberta/ directory.
+    MCQ_DIFFICULTY_MODEL_ENABLED: bool = False
+    MCQ_DIFFICULTY_MODEL_PATH: Optional[str] = None
+    MCQ_DIFFICULTY_MODEL_DEVICE: str = "auto"
+    MCQ_DIFFICULTY_MODEL_FAIL_OPEN: bool = True
+
     # External API keys
     OPENAI_API_KEY: Optional[str] = None
 
