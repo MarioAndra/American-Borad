@@ -74,7 +74,7 @@ def test_label_maps_consistent() -> None:
     name = "1. label maps consistent"
     try:
         assert LABEL_MAP == {0: "easy", 1: "medium", 2: "hard"}
-        assert LABEL_TO_LOGIT == {"easy": -1.0, "medium": 0.0, "hard": 1.0}
+        assert LABEL_TO_LOGIT == {"easy": -2.0, "medium": 0.0, "hard": 2.0}
         assert set(LABEL_MAP.values()) == set(LABEL_TO_LOGIT)
         _ok(name)
     except Exception as exc:
@@ -224,6 +224,25 @@ def test_estimate_disabled_returns_none() -> None:
         _fail(name, str(exc))
 
 
+def test_generation_prompt_difficulty_bands() -> None:
+    name = "13. generation prompt difficulty-band guidance"
+    try:
+        from app.services.generated_question_service import (
+            _DIFFICULTY_BAND_GUIDANCE,
+            _difficulty_band_label,
+        )
+
+        assert _difficulty_band_label(-1.0) == "easy"
+        assert _difficulty_band_label(0.0) == "medium"
+        assert _difficulty_band_label(2.1) == "hard"
+        assert "combine at least two distinct concepts" in _DIFFICULTY_BAND_GUIDANCE["hard"].lower()
+        assert "not be a recall question" in _DIFFICULTY_BAND_GUIDANCE["hard"].lower()
+        assert "single-step recall" in _DIFFICULTY_BAND_GUIDANCE["easy"]
+        _ok(name)
+    except Exception as exc:
+        _fail(name, str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Model-backed tests (skipped when torch/transformers are unavailable)
 # ---------------------------------------------------------------------------
@@ -330,6 +349,44 @@ def test_langgraph_node_fail_open() -> None:
         _fail(name, str(exc))
 
 
+def test_calibration_target_saturation() -> None:
+    name = "14. calibration target saturates at reachable ceiling"
+    try:
+        from app.services.difficulty_calibration_service import (
+            DifficultyCalibrationService,
+        )
+
+        service = DifficultyCalibrationService()
+
+        # Ceiling student (theta 3.5): a hard item (logit 2.0) must pass.
+        report = service.calibrate(target_theta=3.5, difficulty_estimate=2.0)
+        assert report.aligned is True, f"hard item at ceiling should pass: {report}"
+        assert report.effective_target_theta == 2.0
+
+        # A mid-hard item (logit 0.6, hard band) passes at ceiling too.
+        report = service.calibrate(target_theta=3.5, difficulty_estimate=0.6)
+        assert report.aligned is True, f"mid-hard item at ceiling should pass: {report}"
+
+        # A medium item is still rejected for a ceiling student.
+        report = service.calibrate(target_theta=3.5, difficulty_estimate=0.05)
+        assert report.aligned is False, f"medium item at ceiling should block: {report}"
+
+        # Floor student (theta -3.5): easy item passes, medium blocks.
+        report = service.calibrate(target_theta=-3.5, difficulty_estimate=-2.0)
+        assert report.aligned is True, f"easy item at floor should pass: {report}"
+        report = service.calibrate(target_theta=-3.5, difficulty_estimate=0.0)
+        assert report.aligned is False, f"medium item at floor should block: {report}"
+
+        # Mid-range thetas are unaffected by saturation.
+        report = service.calibrate(target_theta=1.0, difficulty_estimate=-1.5)
+        assert report.aligned is False
+        assert report.effective_target_theta == 1.0
+
+        _ok(name)
+    except Exception as exc:
+        _fail(name, str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -346,6 +403,8 @@ def run_all() -> None:
         test_bad_correct_index_rejected,
         test_missing_model_path_handled,
         test_estimate_disabled_returns_none,
+        test_generation_prompt_difficulty_bands,
+        test_calibration_target_saturation,
         test_bundled_model_ready_and_predicts,
         test_langgraph_node_overrides_estimate,
         test_langgraph_node_fail_open,

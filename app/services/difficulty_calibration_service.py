@@ -35,6 +35,7 @@ class DifficultyCalibrationReport:
 
     aligned: bool
     target_theta: float
+    effective_target_theta: float
     predicted_difficulty: float | None
     delta: float | None
     target_band: str
@@ -70,6 +71,14 @@ class DifficultyCalibrationService:
     MAX_DELTA: float = 1.5
     # Maximum delta within a band mismatch before blocking
     MAX_BAND_TOLERANCE: float = 1.0
+    # Maximum |theta| used as the calibration target.  Generated items can
+    # only reach difficulty logits of roughly [-2, +2] (the classifier's
+    # class centers), so a student beyond that range is calibrated against
+    # the nearest reachable difficulty.  This keeps a ceiling student
+    # (e.g. theta 3.5) required to receive a "hard" item while no longer
+    # demanding an item with difficulty 3.5 that the generator cannot
+    # produce.
+    MAX_TARGET_THETA: float = 2.0
 
     def calibrate(
         self,
@@ -92,7 +101,10 @@ class DifficultyCalibrationService:
             Structured result with alignment flag, bands, delta, and issues.
         """
         issues: list[str] = []
-        target_band = _band(target_theta)
+        effective_theta = max(
+            -self.MAX_TARGET_THETA, min(self.MAX_TARGET_THETA, target_theta)
+        )
+        target_band = _band(effective_theta)
 
         try:
             # --- Missing difficulty estimate → fail-closed ---
@@ -108,6 +120,7 @@ class DifficultyCalibrationService:
                 return DifficultyCalibrationReport(
                     aligned=False,
                     target_theta=target_theta,
+                    effective_target_theta=effective_theta,
                     predicted_difficulty=None,
                     delta=None,
                     target_band=target_band,
@@ -116,7 +129,7 @@ class DifficultyCalibrationService:
                 )
 
             predicted_band = _band(difficulty_estimate)
-            delta = abs(difficulty_estimate - target_theta)
+            delta = abs(difficulty_estimate - effective_theta)
 
             # --- Delta exceeds absolute threshold → block ---
             if delta > self.MAX_DELTA:
@@ -135,10 +148,10 @@ class DifficultyCalibrationService:
             aligned = len(issues) == 0
 
             log.info(
-                "DifficultyCalibration %s: target_theta=%.3f (%s), "
+                "DifficultyCalibration %s: target_theta=%.3f (effective %.3f, %s), "
                 "predicted=%.3f (%s), delta=%.3f, issues=%s",
                 "PASSED" if aligned else "BLOCKED",
-                target_theta, target_band,
+                target_theta, effective_theta, target_band,
                 difficulty_estimate, predicted_band,
                 delta, issues,
             )
@@ -146,6 +159,7 @@ class DifficultyCalibrationService:
             return DifficultyCalibrationReport(
                 aligned=aligned,
                 target_theta=target_theta,
+                effective_target_theta=effective_theta,
                 predicted_difficulty=difficulty_estimate,
                 delta=delta,
                 target_band=target_band,
@@ -159,6 +173,7 @@ class DifficultyCalibrationService:
             return DifficultyCalibrationReport(
                 aligned=False,
                 target_theta=target_theta,
+                effective_target_theta=effective_theta,
                 predicted_difficulty=difficulty_estimate,
                 delta=None,
                 target_band=target_band,

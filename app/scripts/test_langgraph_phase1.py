@@ -83,6 +83,7 @@ class _Settings:
         self.PHASE2_SUBTOPIC_GENERATED_QUESTION_COUNT: int = int(kw.get("PHASE2_SUBTOPIC_GENERATED_QUESTION_COUNT", 1))
         self.RAG_GENERATION_PROVIDER: str = str(kw.get("RAG_GENERATION_PROVIDER", "openai"))
         self.PHASE2_PASSING_SCORE: float = float(kw.get("PHASE2_PASSING_SCORE", 70.0))
+        self.MCQ_DIFFICULTY_MODEL_ENABLED: bool = bool(kw.get("MCQ_DIFFICULTY_MODEL_ENABLED", False))
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +309,7 @@ def _invoke(
     repair_side_effect: BaseException | None = None,
     dedup_return: DedupReport | None = None,
     use_real_dedup: bool = False,
+    use_real_difficulty: bool = False,
     confidence_return: ConfidenceReport | None = None,
     confidence_side_effect: BaseException | None = None,
     grounding_return: GroundingReport | None = None,
@@ -424,9 +426,9 @@ def _invoke(
         mock_difficulty.calibrate.return_value = difficulty_return
     else:
         mock_difficulty.calibrate.return_value = DifficultyCalibrationReport(
-            aligned=True, target_theta=0.5, predicted_difficulty=0.4,
-            delta=0.1, target_band="medium", predicted_band="medium",
-            issues=[],
+            aligned=True, target_theta=0.5, effective_target_theta=0.5,
+            predicted_difficulty=0.4, delta=0.1, target_band="medium",
+            predicted_band="medium", issues=[],
         )
 
     # Question repair mock — by default not repairable (no repair triggered)
@@ -455,6 +457,16 @@ def _invoke(
     patches = [
         patch("app.services.topic_streak_service.get_settings", return_value=settings),
     ]
+    # The RoBERTa difficulty override is a separate feature exercised by
+    # app/scripts/test_mcq_difficulty.py. Mock it out here so the pipeline
+    # tests stay deterministic (fake LLM difficulty survives) and fast.
+    if not use_real_difficulty:
+        patches.append(
+            patch(
+                "app.services.mcq_difficulty_service.estimate_generated_difficulty",
+                return_value=None,
+            )
+        )
     if langgraph:
         patches += [
             patch("app.services.adaptive_exam_service.get_settings", return_value=settings),
@@ -4106,8 +4118,9 @@ def test_difficulty_misalignment_blocks_persistence() -> None:
         chunks = _fake_chunks(ids["topic_id"], chunk_ids=ids["chunk_ids"], document_id=ids["document_id"])
 
         bad_difficulty_report = DifficultyCalibrationReport(
-            aligned=False, target_theta=1.0, predicted_difficulty=-1.5,
-            delta=2.5, target_band="hard", predicted_band="easy",
+            aligned=False, target_theta=1.0, effective_target_theta=1.0,
+            predicted_difficulty=-1.5, delta=2.5, target_band="hard",
+            predicted_band="easy",
             issues=["Delta 2.500 exceeds maximum 1.5"],
         )
 
@@ -4667,8 +4680,9 @@ def test_max_repair_count_enforced() -> None:
         chunks = _fake_chunks(ids["topic_id"], chunk_ids=ids["chunk_ids"], document_id=ids["document_id"])
 
         bad_difficulty = DifficultyCalibrationReport(
-            aligned=False, target_theta=1.0, predicted_difficulty=-1.5,
-            delta=2.5, target_band="hard", predicted_band="easy",
+            aligned=False, target_theta=1.0, effective_target_theta=1.0,
+            predicted_difficulty=-1.5, delta=2.5, target_band="hard",
+            predicted_band="easy",
             issues=["Delta 2.500 exceeds maximum 1.5"],
         )
         # First call: repairable, second call: budget exhausted

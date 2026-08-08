@@ -14,6 +14,50 @@ from app.services.rag_retrieval_service import RetrievedChunk
 log = get_logger(__name__)
 
 
+# Difficulty-band thresholds mirror difficulty_calibration_service._band
+# so the LLM's self-reported estimate lands in the same band the calibrator
+# will check against.
+_EASY_UPPER: float = -0.5
+_HARD_LOWER: float = 0.5
+
+# Concrete, per-band generation guidance — keeps the LLM from drifting toward
+# easy/medium items when the target student is high-ability (theta > 0.5).
+_DIFFICULTY_BAND_GUIDANCE: dict[str, str] = {
+    "easy": (
+        "Design the question to be EASY for this student: single-step recall or "
+        "direct application of one concept. Keep the distractors clearly wrong."
+    ),
+    "medium": (
+        "Design the question to be MEDIUM for this student: combine two concepts "
+        "or apply knowledge in a familiar scenario. Distractors should be "
+        "plausible but clearly distinguishable from the correct answer."
+    ),
+    "hard": (
+        "Design the question to be HARD for this student — it must challenge "
+        "a strong, high-ability student. Requirements:\n"
+        "- It must NOT be a recall question: do not ask what a term or "
+        "concept is, and do not write 'according to the provided context' "
+        "style questions.\n"
+        "- It must require the student to APPLY or COMBINE at least two "
+        "distinct concepts from the material (e.g. analyze a scenario, "
+        "compare or rank approaches, diagnose a flaw, or reason through a "
+        "multi-step implication).\n"
+        "- Use precise technical detail and edge-case conditions.\n"
+        "- Make the distractors highly plausible and only subtly wrong — "
+        "each should tempt a strong student who reasons too quickly. Avoid "
+        "obviously wrong or generic distractors."
+    ),
+}
+
+
+def _difficulty_band_label(theta: float) -> str:
+    if theta < _EASY_UPPER:
+        return "easy"
+    if theta > _HARD_LOWER:
+        return "hard"
+    return "medium"
+
+
 @dataclass
 class GenerationInput:
     topic_id: int
@@ -131,12 +175,19 @@ class GeneratedQuestionService:
             f"Average theta in this topic: {avg_theta_str}"
         )
 
+        band = _difficulty_band_label(inp.theta)
+        band_guidance = _DIFFICULTY_BAND_GUIDANCE[band]
+
         prompt = (
             f"Generate an MCQ based on the following course material.\n\n"
             f"{context}\n\n"
             f"--- Student Performance Context ---\n"
             f"{performance}\n\n"
-            f"The difficulty should be appropriate for a student with ability theta={inp.theta:.2f}."
+            f"The difficulty should be appropriate for a student with ability "
+            f"theta={inp.theta:.2f} (difficulty band: {band}).\n"
+            f"{band_guidance}\n\n"
+            f"Your 'difficulty_estimate' must match this band: "
+            f"easy ~ -1.0, medium ~ 0.0, hard ~ +1.5."
         )
 
         if inp.extra_instructions:

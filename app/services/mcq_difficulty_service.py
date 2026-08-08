@@ -24,7 +24,10 @@ LABEL_MAP: dict[int, str] = {0: "easy", 1: "medium", 2: "hard"}
 # IRT logit centers for each class.  Predictions are reported as a soft
 # probability-weighted blend of these so the stored difficulty_estimate stays
 # on the same continuous logit scale the calibration/repair gates expect.
-LABEL_TO_LOGIT: dict[str, float] = {"easy": -1.0, "medium": 0.0, "hard": 1.0}
+# The centers are widened to +/-2 so a high-confidence "hard" prediction can
+# reach the calibrator's MAX_DELTA=1.5 window for high-ability students
+# (theta up to ~3.5) instead of capping at +1.
+LABEL_TO_LOGIT: dict[str, float] = {"easy": -2.0, "medium": 0.0, "hard": 2.0}
 
 # Training-time conventions used when a feature is absent from the runtime.
 DEFAULT_BLOOM_CODE = "BT1"

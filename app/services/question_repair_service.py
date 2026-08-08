@@ -261,13 +261,28 @@ class QuestionRepairService:
                     adjusted_theta = target_theta
 
             direction = "easier" if (difficulty_signed_delta or 0) > 0 else "harder"
+            if direction == "harder":
+                addendum = (
+                    "REPAIR INSTRUCTION: Your previous question was rated too "
+                    "easy for a high-ability student. Regenerate a "
+                    "SUBSTANTIALLY harder question: it must NOT be a recall "
+                    "or 'according to the provided context' question. It must "
+                    "require multi-step reasoning and combine at least two "
+                    "distinct concepts, with highly plausible, subtly wrong "
+                    "distractors. Report a difficulty_estimate of +1.5 or "
+                    "higher."
+                )
+            else:
+                addendum = (
+                    "REPAIR INSTRUCTION: Your previous question was too hard "
+                    "for the target student ability. Regenerate a clearly "
+                    "easier question: simplify to a single concept and make "
+                    "the distractors more obviously wrong. Report a "
+                    "difficulty_estimate near -1.0."
+                )
             return {
                 "target": "difficulty",
-                "context_addendum": (
-                    f"REPAIR INSTRUCTION: Your previous question was too "
-                    f"{direction} for the target student ability. Adjust the "
-                    f"difficulty accordingly."
-                ),
+                "context_addendum": addendum,
                 "adjusted_theta": adjusted_theta,
             }
 
