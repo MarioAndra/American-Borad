@@ -8,6 +8,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
     Phase,
@@ -19,7 +20,8 @@ from app.models import (
     DifficultyLevel,
     QuestionType,
 )
-from app.models.enums import cognitive_level_from_value
+from app.models.enums import CognitiveLevel, cognitive_level_from_value
+from app.services import bloom_classifier_service
 
 
 logger = logging.getLogger("excel_import")
@@ -42,6 +44,9 @@ REQUIRED_COLUMNS = [
 
 OPTION_KEYS = ["Option A", "Option B", "Option C", "Option D"]
 LETTER_INDEX = {"A": 0, "B": 1, "C": 2, "D": 3}
+
+# Conservative fallback used only when BLOOM_MODEL_FAIL_OPEN=true.
+FALLBACK_LEVEL = CognitiveLevel.RememberUnderstand
 
 
 @dataclass
@@ -67,6 +72,45 @@ def _map_enum(enum_cls, value: str, field_name: str) -> object:
         if v.lower() == member.value.lower():
             return member
     raise ValueError(f"Invalid {field_name}: {value}")
+
+
+def _resolve_cognitive_level(question_text: str, excel_value) -> CognitiveLevel:
+    """Resolve the cognitive level for an imported question.
+
+    Uses the Excel ``cognitive_level`` cell when present and valid; otherwise
+    falls back to the DeBERTa Bloom classifier. When the classifier is
+    disabled and no valid cell value exists, raises ``ValueError`` so the row
+    is reported as failed (matching legacy behavior for blank/invalid cells).
+    """
+    settings = get_settings()
+    if not pd.isna(excel_value) and _normalize(str(excel_value)):
+        raw = _normalize(str(excel_value))
+        try:
+            return cognitive_level_from_value(raw)
+        except ValueError:
+            if not settings.BLOOM_MODEL_ENABLED:
+                raise
+            logger.warning(
+                "Invalid Excel cognitive_level %r; classifying with Bloom model", raw
+            )
+
+    if not settings.BLOOM_MODEL_ENABLED:
+        raise ValueError(
+            "Missing or invalid cognitive_level and Bloom classifier is disabled"
+        )
+    try:
+        label = bloom_classifier_service.predict(question_text).label
+        logger.info("Bloom classified imported question -> %s", label.value)
+        return label
+    except Exception as exc:
+        if settings.BLOOM_MODEL_FAIL_OPEN:
+            logger.warning(
+                "Bloom classification failed; using fallback %s: %s",
+                FALLBACK_LEVEL.value,
+                exc,
+            )
+            return FALLBACK_LEVEL
+        raise ValueError("Question could not be classified by Bloom model") from exc
 
 
 class ExcelQuestionImporter:
@@ -147,8 +191,11 @@ class ExcelQuestionImporter:
     def import_row(self, row: pd.Series, summary: ImportSummary) -> None:
         summary.rows_processed += 1
 
-        # Validate required fields
+        # Validate required fields (cognitive_level is optional: blank or
+        # invalid cells fall back to the Bloom classifier)
         for col in REQUIRED_COLUMNS:
+            if col == "cognitive_level":
+                continue
             if _normalize(str(row.get(col, ""))) == "":
                 raise ValueError(f"Missing required column: {col}")
 
@@ -160,7 +207,7 @@ class ExcelQuestionImporter:
 
         # Enums
         difficulty = _map_enum(DifficultyLevel, str(row["difficulty"]), "difficulty")
-        cognitive = cognitive_level_from_value(str(row["cognitive_level"]))
+        cognitive = _resolve_cognitive_level(qtext, row.get("cognitive_level"))
         qtype = _normalize(str(row["question_type"]))
 
         # Hierarchy
